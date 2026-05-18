@@ -1,0 +1,19 @@
+{
+  "updatedAt": "2026-05-12T19:16:49.798Z",
+  "sources": [
+    {
+      "id": "income-tax-act-2025",
+      "title": "Income-tax Act, 2025",
+      "officialUrl": "https://www.incometaxindia.gov.in/income-tax-act-2025",
+      "localMetadata": "docs/legal/income-tax-act-2025/metadata.json",
+      "localJson": "docs/legal/income-tax-act-2025/sections.json",
+      "localText": "docs/legal/income-tax-act-2025/income-tax-act-2025.txt",
+      "sectionsDownloaded": 553
+    },
+    {
+      "id": "msme-act-2006",
+      "title": "Micro, Small and Medium Enterprises Development Act PDF supplied by user",
+      "localPdf": "docs/legal/Msme Act.pdf"
+    }
+  ]
+}
