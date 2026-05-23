@@ -19,6 +19,8 @@ function migrate() {
       is_msme INTEGER NOT NULL DEFAULT 0,
       udyam_number TEXT,
       enterprise_type TEXT,
+      pan_number TEXT,
+      agreed_payment_days INTEGER,
       verification_status TEXT NOT NULL DEFAULT 'pending',
       enterprise_name TEXT,
       registration_validity TEXT,
@@ -72,6 +74,13 @@ function migrate() {
       interest_liability REAL NOT NULL DEFAULT 0,
       disallowance_amount REAL NOT NULL DEFAULT 0,
       oldest_invoice_date TEXT,
+      pan_number TEXT,
+      agreed_payment_days INTEGER,
+      opening_balance REAL NOT NULL DEFAULT 0,
+      closing_balance REAL NOT NULL DEFAULT 0,
+      opening_balance_raw TEXT,
+      closing_balance_raw TEXT,
+      voucher_count INTEGER NOT NULL DEFAULT 0,
       raw_json TEXT NOT NULL,
       FOREIGN KEY(import_run_id) REFERENCES tally_import_runs(id)
     );
@@ -134,6 +143,29 @@ function migrate() {
       FOREIGN KEY(import_run_id) REFERENCES tally_import_runs(id)
     );
 
+    CREATE TABLE IF NOT EXISTS mca_msme1_filings (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      import_run_id TEXT NOT NULL,
+      fiscal_year TEXT NOT NULL,
+      half_year TEXT NOT NULL,
+      status TEXT NOT NULL,
+      template_path TEXT NOT NULL DEFAULT '',
+      generated_file_path TEXT NOT NULL DEFAULT '',
+      row_count INTEGER NOT NULL DEFAULT 0,
+      validation_json TEXT NOT NULL DEFAULT '{}',
+      mca_user_id TEXT NOT NULL DEFAULT '',
+      srn TEXT NOT NULL DEFAULT '',
+      uploaded_at TEXT,
+      created_by TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES compliance_reports(id),
+      FOREIGN KEY(import_run_id) REFERENCES tally_import_runs(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_mca_msme1_filings_report
+      ON mca_msme1_filings(report_id);
+
     CREATE TABLE IF NOT EXISTS purchase_invoices (
       id TEXT PRIMARY KEY,
       vendor_id TEXT,
@@ -179,6 +211,18 @@ function migrate() {
     ["udyam_verified_by", "udyam_verified_by TEXT"],
     ["udyam_verified_at", "udyam_verified_at TEXT"],
     ["udyam_remarks", "udyam_remarks TEXT"],
+    ["action_status", "action_status TEXT NOT NULL DEFAULT 'pending_action'"],
+    ["excluded_reason", "excluded_reason TEXT"],
+    ["evidence_url", "evidence_url TEXT"],
+    ["proof_notes", "proof_notes TEXT"],
+    ["review_status", "review_status TEXT NOT NULL DEFAULT 'queued'"],
+    ["reviewed_by", "reviewed_by TEXT"],
+    ["reviewed_at", "reviewed_at TEXT"],
+    ["review_comment", "review_comment TEXT"],
+    ["source_import_run_id", "source_import_run_id TEXT"],
+    ["last_import_run_id", "last_import_run_id TEXT"],
+    ["pan_number", "pan_number TEXT"],
+    ["agreed_payment_days", "agreed_payment_days INTEGER"],
   ]);
 
   addMissingColumns("tally_ledger_vouchers", [
@@ -189,6 +233,22 @@ function migrate() {
     ["bill_reference", "bill_reference TEXT"],
     ["pending_amount", "pending_amount REAL NOT NULL DEFAULT 0"],
     ["voucher_source", "voucher_source TEXT NOT NULL DEFAULT 'Day Book'"],
+  ]);
+
+  addMissingColumns("tally_import_creditors", [
+    ["opening_balance", "opening_balance REAL NOT NULL DEFAULT 0"],
+    ["closing_balance", "closing_balance REAL NOT NULL DEFAULT 0"],
+    ["opening_balance_raw", "opening_balance_raw TEXT"],
+    ["closing_balance_raw", "closing_balance_raw TEXT"],
+    ["voucher_count", "voucher_count INTEGER NOT NULL DEFAULT 0"],
+    ["pan_number", "pan_number TEXT"],
+    ["agreed_payment_days", "agreed_payment_days INTEGER"],
+  ]);
+
+  addMissingColumns("mca_msme1_filings", [
+    ["mca_user_id", "mca_user_id TEXT NOT NULL DEFAULT ''"],
+    ["srn", "srn TEXT NOT NULL DEFAULT ''"],
+    ["uploaded_at", "uploaded_at TEXT"],
   ]);
 
   db.exec(`

@@ -3,6 +3,8 @@ const { execFile } = require("child_process");
 const { XMLParser } = require("fast-xml-parser");
 const env = require("../config/env");
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
+const { normalizeGroupName, isSundryCreditorGroupName } = require("../utils/sundryCreditor");
+const { getDefaultAnnualInterestRate } = require("./msmeRuleEngine.service");
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -57,7 +59,6 @@ function requestTallyHttp({ method, host, port = env.tallyPort, body = "", timeo
       path: "/",
       method,
       headers: {
-        Connection: "close",
         ...headers,
       },
     };
@@ -256,6 +257,13 @@ function formatTallyDate(date) {
   return `${year}${month}${day}`;
 }
 
+function formatTallyDateLiteral(value) {
+  const date = parseTallyDate(value);
+  if (!date) return "";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${date.getUTCDate()}-${months[date.getUTCMonth()]}-${date.getUTCFullYear()}`;
+}
+
 function addUtcMonths(date, count) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + count, 1));
 }
@@ -326,6 +334,10 @@ function buildLedgerCollectionXML(companyName) {
   return buildExportXml("List of Accounts", staticVariablesXml(companyName));
 }
 
+function buildLedgerMasterCollectionXML(companyName) {
+  return `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Ledger Master Collection</ID></HEADER><BODY><DESC>${staticVariablesXml(companyName)}<TDL><TDLMESSAGE><COLLECTION NAME="MSME Ledger Master Collection" ISMODIFY="No"><TYPE>Ledger</TYPE><FETCH>Name,Parent,OpeningBalance,ClosingBalance,IsBillWiseOn,Guid,GSTIN,GSTRegistrationNumber,GSTRegnNo,IncomeTaxNumber,MailingName,Email,LedgerPhone,LedgerMobile,Address.*,Name.*,LanguageName.*,Narration,Description,Notes,UDF:*</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+}
+
 function buildDayBookXML(from, to, companyName) {
   return buildExportXml("Day Book", staticVariablesXml(companyName, [
     `<SVFROMDATE>${from}</SVFROMDATE>`,
@@ -347,10 +359,18 @@ function buildVoucherCollectionXML(from, to, companyName) {
 }
 
 function buildVoucherObjectCollectionXML(from, to, companyName) {
+  const fromLiteral = formatTallyDateLiteral(from);
+  const toLiteral = formatTallyDateLiteral(to);
+  const dateFilter = fromLiteral && toLiteral
+    ? `<FILTERS>MSMEVoucherDateFilter</FILTERS>`
+    : "";
+  const dateFilterFormula = fromLiteral && toLiteral
+    ? `<SYSTEM TYPE="Formulae" NAME="MSMEVoucherDateFilter">$Date &gt;= $$Date:"${fromLiteral}" AND $Date &lt;= $$Date:"${toLiteral}"</SYSTEM>`
+    : "";
   return `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Voucher Collection</ID></HEADER><BODY><DESC>${staticVariablesXml(companyName, [
     `<SVFROMDATE>${from}</SVFROMDATE>`,
     `<SVTODATE>${to}</SVTODATE>`,
-  ])}<TDL><TDLMESSAGE><COLLECTION NAME="MSME Voucher Collection" ISMODIFY="No"><TYPE>Voucher</TYPE><FETCH>Date,VoucherNumber,VoucherTypeName,PartyLedgerName,PartyName,Reference,AllLedgerEntries.*,LedgerEntries.*,BillAllocations.*</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+  ])}<TDL><TDLMESSAGE><COLLECTION NAME="MSME Voucher Collection" ISMODIFY="No"><TYPE>Voucher</TYPE>${dateFilter}<FETCH>Date,VoucherNumber,VoucherTypeName,PartyLedgerName,PartyName,Reference,AllLedgerEntries.*,LedgerEntries.*,BillAllocations.*</FETCH></COLLECTION>${dateFilterFormula}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
 }
 
 function buildLoadedCompanyCollectionXML() {
@@ -514,30 +534,15 @@ async function tallyRequestWithCompanyVariants(buildXml, companyName, options = 
   return { xml: lastXml, companyName: variants[variants.length - 1] || cleanName(companyName), lineError: lastLineError };
 }
 
-function normalizeGroupName(name) {
-  return String(name || "")
-    .trim()
-    .toUpperCase()
-    .replace(/&/g, " AND ")
-    .replace(/[^A-Z0-9\s]/g, " ")
-    .replace(/\s+/g, " ");
-}
-
 function isCreditorGroupName(name) {
-  const normalized = normalizeGroupName(name);
-  return (
-    /\bSUNDRY\s+CREDITORS?\b/.test(normalized) ||
-    /\bTRADE\s+PAYABLES?\b/.test(normalized) ||
-    /\bSUPPLIER\s+PAYABLES?\b/.test(normalized) ||
-    /\bCREDITORS?\b/.test(normalized)
-  );
+  return isSundryCreditorGroupName(name);
 }
 
 function parseBooleanFlag(value) {
   return /^(YES|TRUE|1)$/i.test(text(value).trim());
 }
 
-function parseBalanceInfo(value) {
+function parseBalanceInfo(value, { creditorLedger = false } = {}) {
   const raw = text(value);
   const cleaned = raw.replace(/,/g, "").trim();
   const match = cleaned.match(/-?\d+(?:\.\d+)?/);
@@ -547,11 +552,24 @@ function parseBalanceInfo(value) {
   const hasDebitMarker = /\bDR\b/i.test(cleaned);
   if (hasCreditMarker && signed > 0) signed = -signed;
   if (hasDebitMarker && signed < 0) signed = Math.abs(signed);
+  let finiteSigned = Number.isFinite(signed) ? signed : 0;
+  if (creditorLedger && !hasCreditMarker && !hasDebitMarker) {
+    finiteSigned = -finiteSigned;
+  }
+  const balanceType = finiteSigned < 0 || hasCreditMarker
+    ? "credit"
+    : finiteSigned > 0 || hasDebitMarker
+      ? "debit"
+      : cleaned
+        ? "zero"
+        : "unknown";
   return {
     raw,
-    signed: Number.isFinite(signed) ? signed : 0,
-    absolute: Math.abs(Number.isFinite(signed) ? signed : 0),
-    payable: signed < 0 || hasCreditMarker,
+    signed: finiteSigned,
+    absolute: Math.abs(finiteSigned),
+    payable: finiteSigned < 0 || hasCreditMarker,
+    polarity: creditorLedger && !hasCreditMarker && !hasDebitMarker ? "creditor_ledger_inferred" : "explicit_or_debit_default",
+    balanceType,
   };
 }
 
@@ -566,6 +584,75 @@ function collectLedgerAliases(ledger) {
   return uniqueCleanNames(aliasValues);
 }
 
+function applyCreditorBalancePolarity(ledger) {
+  if (!ledger?.raw || ledger.raw.DSPACCNAME) return ledger;
+  const opening = parseBalanceInfo(ledger.raw.OPENINGBALANCE, { creditorLedger: true });
+  const closing = parseBalanceInfo(ledger.raw.CLOSINGBALANCE, { creditorLedger: true });
+  return {
+    ...ledger,
+    openingBalance: opening.signed,
+    closingBalance: closing.signed,
+    openingBalanceRaw: opening.raw,
+    closingBalanceRaw: closing.raw,
+    openingBalanceType: opening.balanceType,
+    closingBalanceType: closing.balanceType,
+    openingBalancePolarity: opening.polarity,
+    closingBalancePolarity: closing.polarity,
+    payableBalance: closing.payable,
+    outstandingAmount: closing.payable ? Math.round(closing.absolute * 100) / 100 : 0,
+  };
+}
+
+function collectTextValues(value, output = []) {
+  if (value == null) return output;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    output.push(String(value));
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectTextValues(item, output);
+    return output;
+  }
+  if (typeof value === "object") {
+    for (const [key, nested] of Object.entries(value)) {
+      if (!key.startsWith("@_")) output.push(key);
+      collectTextValues(nested, output);
+    }
+  }
+  return output;
+}
+
+function extractUdyamNumberFromLedger(ledger) {
+  const text = collectTextValues(ledger).join(" ").toUpperCase();
+  const match = text.match(/UDYAM-[A-Z]{2}-\d{2}-\d{7}/);
+  return match ? match[0] : "";
+}
+
+function normalizePanNumber(value) {
+  const pan = cleanName(value).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return /^[A-Z]{5}\d{4}[A-Z]$/.test(pan) ? pan : "";
+}
+
+function extractPanNumberFromLedger(ledger) {
+  const direct = [
+    ledger.INCOMETAXNUMBER,
+    ledger.IncomeTaxNumber,
+    ledger.PAN,
+    ledger.PANNUMBER,
+    ledger.ITPAN,
+    ledger.GSTIN ? String(ledger.GSTIN).slice(2, 12) : "",
+    ledger.GSTREGISTRATIONNUMBER ? String(ledger.GSTREGISTRATIONNUMBER).slice(2, 12) : "",
+    ledger.GSTREGNNO ? String(ledger.GSTREGNNO).slice(2, 12) : "",
+  ];
+  for (const value of direct) {
+    const pan = normalizePanNumber(value);
+    if (pan) return pan;
+  }
+  const textValue = collectTextValues(ledger).join(" ").toUpperCase();
+  const match = textValue.match(/\b[A-Z]{5}\d{4}[A-Z]\b/);
+  return match ? match[0] : "";
+}
+
 function parseLedgerRecords(xml) {
   const { parsed } = validateStandardExportXml(xml, "List of Accounts", ["LEDGER", "GROUP", "DSPACCNAME"]);
   const ledgers = collectByKey(parsed, "LEDGER");
@@ -573,21 +660,28 @@ function parseLedgerRecords(xml) {
     const aliases = collectLedgerAliases(ledger);
     const name = cleanName(ledger["@_NAME"]) || cleanName(ledger.NAME) || aliases[0] || "";
     const parent = cleanName(ledger.PARENT);
-    const closing = parseBalanceInfo(ledger.CLOSINGBALANCE);
-    const opening = parseBalanceInfo(ledger.OPENINGBALANCE);
+    const creditorLedger = isCreditorGroupName(parent);
+    const closing = parseBalanceInfo(ledger.CLOSINGBALANCE, { creditorLedger });
+    const opening = parseBalanceInfo(ledger.OPENINGBALANCE, { creditorLedger });
     return {
       name,
       parent,
       aliases,
       guid: cleanName(ledger.GUID) || cleanName(ledger.Guid) || cleanName(ledger["@_GUID"]),
       gstin: cleanName(ledger.GSTIN) || cleanName(ledger.GSTREGISTRATIONNUMBER) || cleanName(ledger.GSTREGNNO),
+      panNumber: extractPanNumberFromLedger(ledger),
+      udyamNumber: extractUdyamNumberFromLedger(ledger),
       isBillWiseOn: parseBooleanFlag(ledger.ISBILLWISEON),
       openingBalance: opening.signed,
       closingBalance: closing.signed,
       openingBalanceRaw: opening.raw,
       closingBalanceRaw: closing.raw,
-      payableBalance: closing.payable || opening.payable,
-      outstandingAmount: Math.round(closing.absolute * 100) / 100,
+      openingBalanceType: opening.balanceType,
+      closingBalanceType: closing.balanceType,
+      openingBalancePolarity: opening.polarity,
+      closingBalancePolarity: closing.polarity,
+      payableBalance: closing.payable,
+      outstandingAmount: closing.payable ? Math.round(closing.absolute * 100) / 100 : 0,
       raw: ledger,
     };
   }).filter((ledger) => ledger.name);
@@ -607,13 +701,17 @@ function parseLedgerRecords(xml) {
       aliases: [],
       guid: "",
       gstin: "",
+      panNumber: "",
+      udyamNumber: extractUdyamNumberFromLedger({ nameNode, info }),
       isBillWiseOn: false,
       openingBalance: 0,
       closingBalance: crAmt.absolute ? -amount : amount,
       openingBalanceRaw: "",
       closingBalanceRaw: crAmt.raw || drAmt.raw,
+      openingBalanceType: "unknown",
+      closingBalanceType: crAmt.absolute ? "credit" : drAmt.absolute ? "debit" : "unknown",
       payableBalance: crAmt.absolute > 0,
-      outstandingAmount: Math.round(amount * 100) / 100,
+      outstandingAmount: crAmt.absolute ? Math.round(amount * 100) / 100 : 0,
       raw: { nameNode, info },
     };
   }).filter((ledger) => ledger.name);
@@ -649,20 +747,14 @@ function groupAncestors(parentName, groupMap) {
 function classifyCreditorLedger(ledger, groupMap) {
   const ancestry = groupAncestors(ledger.parent, groupMap);
   const groupNames = [ledger.parent, ...ancestry].filter(Boolean);
-  const parentCreditor = groupNames.some(isCreditorGroupName);
-  const aliasCreditor = ledger.aliases.some(isCreditorGroupName);
-  const hasOutstanding = ledger.outstandingAmount > 0;
+  const parentCreditor = groupNames.some(isSundryCreditorGroupName);
   const hasBalanceSignal = Boolean(ledger.closingBalanceRaw || ledger.openingBalanceRaw);
   const reasons = [];
   if (parentCreditor) reasons.push("creditor_parent_or_ancestor");
-  if (aliasCreditor) reasons.push("creditor_alias");
   if (ledger.isBillWiseOn) reasons.push("bill_wise_enabled");
   if (ledger.payableBalance) reasons.push("payable_balance");
-  if (!hasBalanceSignal && (parentCreditor || aliasCreditor)) reasons.push("balance_unavailable_parent_match");
-  const detected =
-    parentCreditor ||
-    aliasCreditor ||
-    (hasOutstanding && (ledger.payableBalance || ledger.isBillWiseOn));
+  if (!hasBalanceSignal && parentCreditor) reasons.push("balance_unavailable_parent_match");
+  const detected = parentCreditor && (ledger.payableBalance || !hasBalanceSignal);
   return { detected, reasons, groupNames };
 }
 
@@ -697,15 +789,18 @@ function parseLedgerCollectionDetailed(xml, { groupXml = "" } = {}) {
   const skipped = [];
 
   for (const ledger of records) {
-    const classification = classifyCreditorLedger(ledger, groupMap);
+    const ancestry = groupAncestors(ledger.parent, groupMap);
+    const creditorGroup = [ledger.parent, ...ancestry].some(isCreditorGroupName);
+    const normalizedLedger = creditorGroup ? applyCreditorBalancePolarity(ledger) : ledger;
+    const classification = classifyCreditorLedger(normalizedLedger, groupMap);
     if (!classification.detected) {
-      skipped.push(ledger);
+      skipped.push(normalizedLedger);
       continue;
     }
     creditors.push({
-      ...ledger,
-      name: ledger.name,
-      normalizedVendorName: normalizeVendorName(ledger.name),
+      ...normalizedLedger,
+      name: normalizedLedger.name,
+      normalizedVendorName: normalizeVendorName(normalizedLedger.name),
       detectionReasons: classification.reasons,
       groupHierarchy: classification.groupNames,
     });
@@ -987,6 +1082,7 @@ async function fetchCreditors({ from = "20250401", to = "20260331", group = "Sun
   let creditors = [];
   let warnings = [];
   let creditorDiagnostics = null;
+  let primaryExportPathUsed = "List of Accounts";
   const company = await requireTallyCompany({ companyName });
   logImportStage("creditorsExport", {
     status: "start",
@@ -994,7 +1090,7 @@ async function fetchCreditors({ from = "20250401", to = "20260331", group = "Sun
     to,
     group,
     companyName: company.companyName,
-    primaryExportPath: "List of Accounts",
+    primaryExportPath: "Ledger Master Collection",
   });
   try {
     const { xml: ledgerXml } = await tallyRequestWithCompanyVariants(
@@ -1007,17 +1103,70 @@ async function fetchCreditors({ from = "20250401", to = "20260331", group = "Sun
     const parsedLedgers = parseLedgerCollectionDetailed(ledgerXml, { groupName: group });
     creditors = parsedLedgers.creditors;
     creditorDiagnostics = parsedLedgers.diagnostics;
+    try {
+      const { xml: masterXml } = await tallyRequestWithCompanyVariants(
+        (selectedCompany) => buildLedgerMasterCollectionXML(selectedCompany),
+        company.companyName,
+        { timeoutMs: 30000 }
+      );
+      validateStandardExportXml(masterXml, "Ledger Master Collection balance enrichment", ["LEDGER"]);
+      const parsedMaster = parseLedgerCollectionDetailed(masterXml, { groupName: group, groupXml: ledgerXml });
+      const masterByNormalized = new Map(parseLedgerRecords(masterXml).map((ledger) => [normalizeVendorName(ledger.name), ledger]));
+      if (parsedMaster.creditors.length) {
+        creditors = parsedMaster.creditors;
+        creditorDiagnostics = parsedMaster.diagnostics;
+        source = "ledger_master_collection";
+        primaryExportPathUsed = "Ledger Master Collection";
+      } else {
+        creditors = creditors.map((creditor) => {
+          const master = masterByNormalized.get(creditor.normalizedVendorName);
+          if (!master) return creditor;
+          return {
+            ...creditor,
+            openingBalance: master.openingBalance,
+            closingBalance: master.closingBalance,
+            openingBalanceRaw: master.openingBalanceRaw,
+            closingBalanceRaw: master.closingBalanceRaw,
+            openingBalanceType: master.openingBalanceType,
+            closingBalanceType: master.closingBalanceType,
+            payableBalance: master.payableBalance,
+            outstandingAmount: master.outstandingAmount,
+            guid: master.guid || creditor.guid,
+            gstin: master.gstin || creditor.gstin,
+            panNumber: master.panNumber || creditor.panNumber,
+          };
+        });
+      }
+      logImportStage("creditorsExport", {
+        status: "balance_enriched",
+        source: "Ledger Master Collection",
+        enrichedCount: creditors.filter((creditor) => masterByNormalized.has(creditor.normalizedVendorName)).length,
+      });
+    } catch (balanceError) {
+      logImportStage("creditorsExport", {
+        status: "balance_enrichment_skipped",
+        source: "Ledger Master Collection",
+        error: balanceError.message,
+      });
+    }
+    const beforeCreditFilter = creditors.length;
+    creditors = creditors.filter((creditor) => creditor.payableBalance && creditor.outstandingAmount > 0);
+    if (creditorDiagnostics) {
+      creditorDiagnostics.detectedCreditorCount = creditors.length;
+      creditorDiagnostics.filteredNonCreditBalanceCount = beforeCreditFilter - creditors.length;
+    }
     logImportStage("creditorsExport", {
       status: "classified",
       source,
-      primaryExportPathUsed: "List of Accounts",
+      primaryExportPathUsed,
       groupSummaryFallback: "skipped",
-      fallbackSkippedReason: "List of Accounts is the stable creditor source",
+      fallbackSkippedReason: "List of Accounts remains the stable creditor classification source",
       totalLedgersExported: creditorDiagnostics.totalLedgersExported,
       detectedCreditorCount: creditorDiagnostics.detectedCreditorCount,
       skippedLedgerCount: creditorDiagnostics.skippedLedgerCount,
       sampleParentNames: creditorDiagnostics.sampleParentNames,
       detectedParentNames: creditorDiagnostics.detectedParentNames,
+      filteredNonCreditBalanceCount: creditorDiagnostics.filteredNonCreditBalanceCount || 0,
     });
   } catch (ledgerError) {
     logImportStage("creditorsExport", { status: "ledger_collection_failed", error: ledgerError.message });
@@ -1038,7 +1187,7 @@ async function fetchCreditors({ from = "20250401", to = "20260331", group = "Sun
     logImportStage("creditorsExport", {
       status: "empty",
       source,
-      primaryExportPathUsed: "List of Accounts",
+      primaryExportPathUsed,
       groupSummaryFallback: "skipped",
       fallbackSkippedReason: "Group Summary disabled for TallyPrime compatibility",
       diagnostics: creditorDiagnostics || null,
@@ -1055,7 +1204,7 @@ async function fetchCreditors({ from = "20250401", to = "20260331", group = "Sun
   logImportStage("creditorsExport", {
     status: "success",
     source,
-    primaryExportPathUsed: "List of Accounts",
+    primaryExportPathUsed,
     groupSummaryFallback: "skipped",
     count: creditors.length,
     diagnostics: creditorDiagnostics ? {
@@ -1082,18 +1231,33 @@ async function fetchCreditors({ from = "20250401", to = "20260331", group = "Sun
   }
   const effectiveAsOn = asOn || new Date().toISOString().split("T")[0];
   const agingMap = computeFIFOAging(purchases, payments, effectiveAsOn);
+  const annualInterestRate = getDefaultAnnualInterestRate();
 
   const result = creditors.map((creditor) => {
     const aging = agingMap[creditor.name] || null;
     const days = aging ? aging.daysOutstanding : null;
     const delayed = days != null && days > 45;
     const interest = delayed
-      ? creditor.outstandingAmount * (Math.pow(1 + 0.195 / 12, days / 30) - 1)
+      ? creditor.outstandingAmount * (Math.pow(1 + annualInterestRate / 12, days / 30) - 1)
       : 0;
     return {
       party: creditor.name,
       normalizedVendorName: creditor.normalizedVendorName,
       outstandingAmount: creditor.outstandingAmount,
+      openingBalance: creditor.openingBalance,
+      closingBalance: creditor.closingBalance,
+      openingBalanceRaw: creditor.openingBalanceRaw,
+      closingBalanceRaw: creditor.closingBalanceRaw,
+      openingBalanceType: creditor.openingBalanceType,
+      closingBalanceType: creditor.closingBalanceType,
+      payableBalance: creditor.payableBalance,
+      guid: creditor.guid,
+      gstin: creditor.gstin,
+      panNumber: creditor.panNumber,
+      udyamNumber: creditor.udyamNumber,
+      detectionReasons: creditor.detectionReasons,
+      groupHierarchy: creditor.groupHierarchy,
+      raw: creditor.raw,
       daysOutstanding: days,
       bucket: aging ? aging.bucket : "Unknown",
       delayed,
@@ -1171,12 +1335,14 @@ function dateInTallyRange(date, from, to) {
   return /^\d{8}$/.test(compact) && compact >= from && compact <= to;
 }
 
-async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, companyName, mode }) {
+async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, companyName, mode, fallbackUsed = true }) {
   const startedAt = Date.now();
+  const primaryExportPath = fallbackUsed ? "Day Book" : "Voucher Collection";
+  const fallbackExportPath = fallbackUsed ? "Voucher Collection" : "";
   logImportStage("vouchersExport", {
-    status: "fallback_batch_start",
-    primaryExportPath: "Day Book",
-    fallbackExportPath: "Voucher Collection",
+    status: fallbackUsed ? "fallback_batch_start" : "batch_start",
+    primaryExportPath,
+    ...(fallbackExportPath ? { fallbackExportPath } : {}),
     mode,
     label: batch.label,
     from: batch.from,
@@ -1197,9 +1363,9 @@ async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, company
   const maxRows = maxVoucherRowsPerBatch();
   const limitedRows = rows.slice(0, maxRows);
   logImportStage("vouchersExport", {
-    status: "fallback_batch_end",
-    primaryExportPath: "Day Book",
-    fallbackExportPath: "Voucher Collection",
+    status: fallbackUsed ? "fallback_batch_end" : "batch_end",
+    primaryExportPath,
+    ...(fallbackExportPath ? { fallbackExportPath } : {}),
     mode,
     label: batch.label,
     from: batch.from,
@@ -1214,7 +1380,7 @@ async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, company
   return {
     rows: limitedRows,
     source: "Voucher Collection",
-    fallbackUsed: true,
+    fallbackUsed,
     warning: rows.length > maxRows
       ? { ledgerName: "ALL", message: `Voucher collection batch ${batch.label} exceeded ${maxRows} rows and was truncated to prevent huge exports.` }
       : null,
@@ -1223,6 +1389,21 @@ async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, company
 
 async function fetchVoucherBatch({ batch, creditorNames, companyName, mode = "quarter" }) {
   const startedAt = Date.now();
+  try {
+    return await fetchVoucherObjectCollectionBatch({ batch, creditorNames, companyName, mode, fallbackUsed: false });
+  } catch (collectionError) {
+    logImportStage("vouchersExport", {
+      status: "primary_collection_failed",
+      primaryExportPath: "Voucher Collection",
+      fallbackExportPath: "Day Book",
+      mode,
+      label: batch.label,
+      from: batch.from,
+      to: batch.to,
+      error: collectionError.message,
+    });
+  }
+
   const xmlBody = buildVoucherCollectionXML(batch.from, batch.to, companyName);
   logImportStage("vouchersExport", {
     status: "batch_start",
@@ -1566,7 +1747,9 @@ module.exports = {
   buildPeriodBatches,
   buildMonthlyBatches,
   buildVoucherCollectionXML,
+  buildVoucherObjectCollectionXML,
   buildLedgerCollectionXML,
+  buildLedgerMasterCollectionXML,
   buildLedgerVouchersXML,
   parseCompanyNames,
   normalizeCompanyName,

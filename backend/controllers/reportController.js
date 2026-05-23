@@ -3,9 +3,9 @@ const { actorFromUser } = require("../middleware/auth");
 
 async function createMSME(req, res, next) {
   try {
-    const { importRunId, fiscalYear } = req.body || {};
+    const { importRunId, fiscalYear, asOnDate, bankRatePercent } = req.body || {};
     if (!importRunId) return res.status(400).json({ success: false, error: "importRunId is required" });
-    const report = reportService.createMSMEReport({ importRunId, fiscalYear, actor: actorFromUser(req) });
+    const report = reportService.createMSMEReport({ importRunId, fiscalYear, asOnDate, bankRatePercent, actor: actorFromUser(req) });
     res.json({ success: true, report });
   } catch (error) {
     next(error);
@@ -54,4 +54,28 @@ async function downloadXml(req, res, next) {
   }
 }
 
-module.exports = { createMSME, getReport, listReports, downloadCsv, downloadXml };
+async function evidenceBundle(req, res, next) {
+  try {
+    const report = reportService.getReport(req.params.id);
+    if (!report) return res.status(404).json({ success: false, error: "Report not found" });
+    res.type("application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename=MSME_Evidence_Bundle_${report.id}.zip`);
+    res.send(reportService.buildEvidenceBundle(report));
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function tallyReconciliation(req, res, next) {
+  try {
+    const report = reportService.getReport(req.params.id);
+    if (!report) return res.status(404).json({ success: false, error: "Report not found" });
+    res.type("text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename=MSME_Tally_Reconciliation_${report.id}.csv`);
+    res.send(reportService.toTallyReconciliationCsv(report));
+  } catch (error) {
+    next(error);
+  }
+}
+
+module.exports = { createMSME, getReport, listReports, downloadCsv, downloadXml, evidenceBundle, tallyReconciliation };

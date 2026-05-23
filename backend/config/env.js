@@ -14,6 +14,7 @@ module.exports = {
   tallyCompanyName: process.env.TALLY_COMPANY_NAME || "",
   databasePath: process.env.DATABASE_PATH || "backend/data/msme-guard.sqlite",
   udyamFailureDir: process.env.UDYAM_FAILURE_DIR || "backend/storage/udyam-failures",
+  msmeBankRatePercent: Number(process.env.MSME_BANK_RATE_PERCENT || 5.5),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   anthropicChatModel: process.env.ANTHROPIC_CHAT_MODEL || "claude-sonnet-4-20250514",
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || "msme-guard",

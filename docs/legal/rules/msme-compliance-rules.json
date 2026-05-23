@@ -1,5 +1,5 @@
 {
-  "version": "2026-05-13",
+  "version": "2026-05-20",
   "title": "MSME Guard Rule Pack",
   "description": "Rule-based compliance mapping for MSME delayed payment reporting. These rules are explicit software rules derived from local legal source files and are not AI classifications.",
   "sources": [
@@ -12,7 +12,26 @@
       "id": "ITA_1961",
       "title": "Income-tax Act, 1961",
       "officialUrl": "https://www.incometaxindia.gov.in/pages/acts/income-tax-act.aspx",
-      "localPath": "docs/legal/income-tax-act-2025/sections-min.json"
+      "localPath": "docs/legal/Income-tax-Act-1961_as-amended-by-Finance-Act-2026.pdf"
+    },
+    {
+      "id": "ITA_2025",
+      "title": "Income-tax Act, 2025",
+      "officialUrl": "https://www.incometaxindia.gov.in/income-tax-act-2025",
+      "localPath": "docs/legal/Income-tax-Act-2025_as-amended-by-Finance-Act-2026.pdf",
+      "localJson": "docs/legal/income-tax-act-2025/sections-min.json"
+    },
+    {
+      "id": "IT_RULES_1962",
+      "title": "Income-tax Rules, 1962",
+      "officialUrl": "https://www.incometaxindia.gov.in/income-tax-rules",
+      "localPath": "docs/legal/Income-tax-Rules-1962_2026-04-01_05-44-55_6f86ac_en.pdf"
+    },
+    {
+      "id": "IT_RULES_2026",
+      "title": "Income-tax Rules, 2026",
+      "officialUrl": "https://www.incometaxindia.gov.in/income-tax-rule-2026",
+      "localPath": "docs/legal/Income-tax-Rules-2026_2026-05-02_06-43-43_f4bcb3_en.pdf"
     }
   ],
   "rules": [
@@ -74,10 +93,21 @@
       "id": "ITA-ACTUAL-PAYMENT-037",
       "name": "Income-tax Act 1961 section 43B(h) actual payment rule",
       "sourceRefs": [
-        "Income-tax Act, 1961 Section 43B(h)"
+        "Income-tax Act, 1961 Section 43B(h)",
+        "Income-tax Rules, 1962"
       ],
       "condition": "Amount payable by assessee to a micro or small enterprise is beyond the time limit specified in MSMED Act section 15.",
       "effect": "Delayed unpaid principal is flagged as disallowance/actual-payment risk for tax computation review."
+    },
+    {
+      "id": "ITA-2025-ACTUAL-PAYMENT-037",
+      "name": "Income-tax Act 2025 section 37(g) actual payment rule",
+      "sourceRefs": [
+        "Income-tax Act, 2025 Section 37(2)(g)",
+        "Income-tax Rules, 2026"
+      ],
+      "condition": "Amount payable by assessee to a micro or small enterprise is beyond the time limit specified in MSMED Act section 15.",
+      "effect": "For tax years governed by the Income-tax Act, 2025, delayed unpaid principal is flagged as actual-payment disallowance risk."
     }
   ]
 }

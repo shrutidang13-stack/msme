@@ -1,9 +1,13 @@
 const fs = require("fs");
 const path = require("path");
+const env = require("../config/env");
 
 const RULE_PACK_PATH = path.resolve(process.cwd(), "docs/legal/rules/msme-compliance-rules.json");
 const DEFAULT_ALLOWED_DAYS = 45;
-const DEFAULT_ANNUAL_INTEREST_RATE = 0.195;
+const DEFAULT_BANK_RATE_PERCENT = 5.5;
+const DEFAULT_ANNUAL_INTEREST_RATE = 0.165;
+const ACTUAL_PAYMENT_RULE_1961 = "ITA-ACTUAL-PAYMENT-037";
+const ACTUAL_PAYMENT_RULE_2025 = "ITA-2025-ACTUAL-PAYMENT-037";
 
 function loadRulePack() {
   return JSON.parse(fs.readFileSync(RULE_PACK_PATH, "utf8"));
@@ -11,6 +15,39 @@ function loadRulePack() {
 
 function roundMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
+}
+
+function normalizePercent(value, fallback = DEFAULT_BANK_RATE_PERCENT) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function getConfiguredBankRatePercent() {
+  return normalizePercent(env.msmeBankRatePercent, DEFAULT_BANK_RATE_PERCENT);
+}
+
+function getDefaultAnnualInterestRate(bankRatePercent = getConfiguredBankRatePercent()) {
+  return normalizePercent(bankRatePercent, DEFAULT_BANK_RATE_PERCENT) * 3 / 100;
+}
+
+function fiscalYearStart(fiscalYear) {
+  const match = String(fiscalYear || "").match(/^(\d{4})-(\d{2})$/);
+  return match ? Number(match[1]) : 2025;
+}
+
+function taxBasisForFiscalYear(fiscalYear = "2025-26") {
+  if (fiscalYearStart(fiscalYear) >= 2026) {
+    return {
+      applicableAct: "Income Tax Act, 2025",
+      applicableSection: "Section 37(2)(g)",
+      actualPaymentRuleId: ACTUAL_PAYMENT_RULE_2025,
+    };
+  }
+  return {
+    applicableAct: "Income Tax Act, 1961",
+    applicableSection: "Section 43B(h)",
+    actualPaymentRuleId: ACTUAL_PAYMENT_RULE_1961,
+  };
 }
 
 function isVerifiedMSME(vendorMaster) {
@@ -26,7 +63,7 @@ function allowedPaymentDays(vendor = {}) {
   return DEFAULT_ALLOWED_DAYS;
 }
 
-function compoundMonthlyInterest(principal, delayDays, annualRate = DEFAULT_ANNUAL_INTEREST_RATE) {
+function compoundMonthlyInterest(principal, delayDays, annualRate = getDefaultAnnualInterestRate()) {
   if (!principal || !delayDays || delayDays <= 0) return 0;
   const monthlyRate = annualRate / 12;
   const months = delayDays / 30;
@@ -35,6 +72,7 @@ function compoundMonthlyInterest(principal, delayDays, annualRate = DEFAULT_ANNU
 
 function evaluateVendor(vendor, options = {}) {
   const rulePack = options.rulePack || loadRulePack();
+  const taxBasis = taxBasisForFiscalYear(options.fiscalYear);
   const master = vendor.vendorMaster;
   const eligible = isVerifiedMSME(master);
   const daysOutstanding = Number(vendor.daysOutstanding || 0);
@@ -42,7 +80,8 @@ function evaluateVendor(vendor, options = {}) {
   const maxDays = allowedPaymentDays(vendor);
   const delayDays = eligible ? Math.max(daysOutstanding - maxDays, 0) : 0;
   const isDelayed = delayDays > 0;
-  const annualInterestRate = Number(options.annualInterestRate || DEFAULT_ANNUAL_INTEREST_RATE);
+  const bankRatePercent = normalizePercent(options.bankRatePercent, getConfiguredBankRatePercent());
+  const annualInterestRate = Number(options.annualInterestRate ?? getDefaultAnnualInterestRate(bankRatePercent));
   const interest = compoundMonthlyInterest(outstandingAmount, delayDays, annualInterestRate);
   const disallowed = isDelayed ? roundMoney(outstandingAmount) : 0;
   const taxImpact = isDelayed ? roundMoney(outstandingAmount * Number(options.taxRate || 0.25)) : 0;
@@ -61,7 +100,7 @@ function evaluateVendor(vendor, options = {}) {
       "MSME-INTEREST-016",
       "MSME-DISCLOSURE-022",
       "MSME-INTEREST-NONDEDUCTIBLE-023",
-      "ITA-ACTUAL-PAYMENT-037"
+      taxBasis.actualPaymentRuleId
     );
     findings.push(`Outstanding exceeds ${maxDays} day MSMED Act payment limit by ${delayDays} days.`);
     findings.push("Principal is flagged for actual-payment disallowance review.");
@@ -77,6 +116,12 @@ function evaluateVendor(vendor, options = {}) {
     daysOutstanding,
     delayDays,
     interestRate: annualInterestRate,
+    bankRatePercent,
+    annualInterestRatePercent: roundMoney(annualInterestRate * 100),
+    interestRateSource: "config",
+    applicableAct: taxBasis.applicableAct,
+    applicableSection: taxBasis.applicableSection,
+    actualPaymentRuleId: taxBasis.actualPaymentRuleId,
     interest,
     disallowed,
     taxImpact,
@@ -95,9 +140,15 @@ function evaluateVendor(vendor, options = {}) {
 
 module.exports = {
   DEFAULT_ALLOWED_DAYS,
+  DEFAULT_BANK_RATE_PERCENT,
   DEFAULT_ANNUAL_INTEREST_RATE,
+  ACTUAL_PAYMENT_RULE_1961,
+  ACTUAL_PAYMENT_RULE_2025,
   loadRulePack,
   isVerifiedMSME,
   evaluateVendor,
   compoundMonthlyInterest,
+  getConfiguredBankRatePercent,
+  getDefaultAnnualInterestRate,
+  taxBasisForFiscalYear,
 };

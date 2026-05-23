@@ -9,6 +9,8 @@ const reportRoutes = require("./routes/reportRoutes");
 const auditRoutes = require("./routes/auditRoutes");
 const purchaseInvoiceRoutes = require("./routes/purchaseInvoiceRoutes");
 const legalRoutes = require("./routes/legalRoutes");
+const msmeRoutes = require("./routes/msmeRoutes");
+const mcaMsme1Routes = require("./routes/mcaMsme1Routes");
 const { requireAuth } = require("./middleware/auth");
 
 const app = express();
@@ -28,6 +30,8 @@ app.use("/api", purchaseInvoiceRoutes);
 app.use("/api", reportRoutes);
 app.use("/api", auditRoutes);
 app.use("/api", legalRoutes);
+app.use("/api", msmeRoutes);
+app.use("/api", mcaMsme1Routes);
 app.use("/api/ai", aiRoutes);
 
 app.get("/", (req, res) => {
@@ -44,6 +48,8 @@ app.get("/", (req, res) => {
       "GET  /api/purchase-invoices",
       "POST /api/purchase-invoices",
       "GET  /api/legal/rules",
+      "POST /api/msme/interest-calculator",
+      "POST /api/mca/msme1/generate",
       "POST /api/reports/msme",
       "POST /api/run-full-audit",
     ].join("\n")

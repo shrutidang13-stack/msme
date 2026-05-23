@@ -10,6 +10,8 @@ const statusStyles = {
   pending_manual_review: "bg-yellow-100 text-yellow-700",
   approved: "bg-green-100 text-green-700",
   rejected: "bg-red-100 text-red-700",
+  not_required: "bg-gray-100 text-gray-700",
+  not_required_zero_outstanding: "bg-gray-100 text-gray-700",
 };
 
 function statusLabel(vendor) {
@@ -21,6 +23,7 @@ function statusLabel(vendor) {
   if (status === "rejected") return "Rejected";
   if (status === "manual_confirmed") return "Manual Confirmed";
   if (status === "not_msme") return "Non-MSME";
+  if (status === "not_required" || status === "not_required_zero_outstanding") return "Not Required";
   if (status === "failed") return "Failed";
   return "Pending";
 }
@@ -92,6 +95,8 @@ export default function VendorVerificationTable({
           <thead className="sticky top-0 bg-gray-50">
             <tr>
               <th className="text-left p-2 text-gray-600">Vendor Name</th>
+              <th className="text-left p-2 text-gray-600">PAN Card</th>
+              <th className="text-left p-2 text-gray-600">Payment Terms</th>
               <th className="text-left p-2 text-gray-600">MSME Registered?</th>
               <th className="text-left p-2 text-gray-600">Udyam Number</th>
               <th className="text-left p-2 text-gray-600">Enterprise Type</th>
@@ -111,6 +116,12 @@ export default function VendorVerificationTable({
                     {vendor.vendorMaster?.enterpriseName && (
                       <p className="text-gray-500 font-normal mt-1">{vendor.vendorMaster.enterpriseName}</p>
                     )}
+                  </td>
+                  <td className="p-2 text-xs font-mono">
+                    {vendor.panNumber || vendor.vendorMaster?.panNumber || <span className="text-gray-400 font-sans">Not available in Tally</span>}
+                  </td>
+                  <td className="p-2 text-xs">
+                    {(vendor.agreedPaymentDays || vendor.vendorMaster?.agreedPaymentDays) ? `${vendor.agreedPaymentDays || vendor.vendorMaster?.agreedPaymentDays} days` : <span className="text-gray-400">Not imported</span>}
                   </td>
                   <td className="p-2">
                     <select

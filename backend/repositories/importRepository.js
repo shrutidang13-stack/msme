@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const db = require("../config/database");
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
+const { isSundryCreditorRow } = require("../utils/sundryCreditor");
 
 function nowIso() {
   return new Date().toISOString();
@@ -37,6 +38,8 @@ function mapRun(row) {
 }
 
 function mapCreditor(row, vendorMaster = null) {
+  const raw = parseJson(row.raw_json, {});
+  const sundryCreditor = isSundryCreditorRow(raw);
   return {
     id: row.id,
     importRunId: row.import_run_id,
@@ -49,6 +52,27 @@ function mapCreditor(row, vendorMaster = null) {
     interestLiability: row.interest_liability,
     disallowanceAmount: row.disallowance_amount,
     oldestInvoiceDate: row.oldest_invoice_date || "",
+    openingBalance: Number(row.opening_balance ?? raw.openingBalance ?? 0),
+    closingBalance: Number(row.closing_balance ?? raw.closingBalance ?? 0),
+    openingBalanceRaw: row.opening_balance_raw || raw.openingBalanceRaw || "",
+    closingBalanceRaw: row.closing_balance_raw || raw.closingBalanceRaw || "",
+    openingBalanceType: raw.openingBalanceType || "",
+    closingBalanceType: raw.closingBalanceType || "",
+    ledgerOutstandingAmount: Number(raw.ledgerOutstandingAmount ?? row.outstanding_amount ?? 0),
+    voucherOutstandingAmount: Number(raw.voucherOutstandingAmount ?? 0),
+    outstandingMismatch: Boolean(raw.outstandingMismatch),
+    mismatchReason: raw.mismatchReason || "",
+    payableAging: raw.payableAging || null,
+    voucherCount: Number(row.voucher_count ?? raw.voucherCount ?? 0),
+    detectedUdyamNumber: raw.udyamNumber || raw.detectedUdyamNumber || "",
+    gstin: raw.gstin || "",
+    panNumber: row.pan_number || raw.panNumber || "",
+    agreedPaymentDays: Number(row.agreed_payment_days ?? raw.agreedPaymentDays ?? 0),
+    parent: raw.parent || "",
+    groupHierarchy: Array.isArray(raw.groupHierarchy) ? raw.groupHierarchy : [],
+    detectionReasons: Array.isArray(raw.detectionReasons) ? raw.detectionReasons : [],
+    isSundryCreditor: sundryCreditor,
+    raw,
     vendorMaster,
   };
 }
@@ -109,15 +133,25 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
     const insert = db.prepare(`
       INSERT INTO tally_import_creditors (
         id, import_run_id, vendor_name, normalized_vendor_name, outstanding_amount, days_outstanding,
-        bucket, delayed, interest_liability, disallowance_amount, oldest_invoice_date, raw_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        bucket, delayed, interest_liability, disallowance_amount, oldest_invoice_date,
+        pan_number, agreed_payment_days, opening_balance, closing_balance, opening_balance_raw, closing_balance_raw, voucher_count, raw_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
+    const voucherCountsByVendor = new Map();
+    for (const voucher of ledgerVouchers) {
+      const vendorName = voucher.vendorName || voucher.ledgerName;
+      const normalizedVendorName = voucher.normalizedVendorName || voucher.normalizedLedgerName || normalizeVendorName(vendorName);
+      if (!normalizedVendorName) continue;
+      voucherCountsByVendor.set(normalizedVendorName, (voucherCountsByVendor.get(normalizedVendorName) || 0) + 1);
+    }
     for (const creditor of creditors) {
+      const normalizedVendorName = creditor.normalizedVendorName || normalizeVendorName(creditor.party);
+      const voucherCount = voucherCountsByVendor.get(normalizedVendorName) || creditor.voucherCount || 0;
       insert.run(
         crypto.randomUUID(),
         id,
         creditor.party,
-        creditor.normalizedVendorName || normalizeVendorName(creditor.party),
+        normalizedVendorName,
         creditor.outstandingAmount || 0,
         creditor.daysOutstanding ?? null,
         creditor.bucket || "Unknown",
@@ -125,7 +159,14 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
         creditor.interestLiability || 0,
         creditor.disallowanceAmount || 0,
         creditor.oldestInvoiceDate || "",
-        JSON.stringify(creditor)
+        creditor.panNumber || "",
+        creditor.agreedPaymentDays || creditor.vendorMaster?.agreedPaymentDays || 0,
+        creditor.openingBalance || 0,
+        creditor.closingBalance || 0,
+        creditor.openingBalanceRaw || "",
+        creditor.closingBalanceRaw || "",
+        voucherCount,
+        JSON.stringify({ ...creditor, voucherCount })
       );
     }
     const insertVoucher = db.prepare(`
@@ -226,8 +267,22 @@ function listRuns() {
   return db.prepare("SELECT * FROM tally_import_runs ORDER BY created_at DESC LIMIT 50").all().map(mapRun);
 }
 
+function getRawCreditorRows(importRunId) {
+  return db.prepare("SELECT * FROM tally_import_creditors WHERE import_run_id = ? ORDER BY outstanding_amount DESC").all(importRunId);
+}
+
+function getIgnoredNonSundryCreditors(importRunId) {
+  return getRawCreditorRows(importRunId)
+    .map((row) => mapCreditor(row))
+    .filter((row) => !isSundryCreditorRow(row));
+}
+
 function getCreditors(importRunId) {
-  return db.prepare("SELECT * FROM tally_import_creditors WHERE import_run_id = ? ORDER BY outstanding_amount DESC").all(importRunId).map((row) => mapCreditor(row));
+  return getRawCreditorRows(importRunId).map((row) => mapCreditor(row)).filter(isSundryCreditorRow);
+}
+
+function getSundryCreditorNames(importRunId) {
+  return new Set(getCreditors(importRunId).map((creditor) => creditor.normalizedVendorName).filter(Boolean));
 }
 
 function isAllFilter(value) {
@@ -238,6 +293,14 @@ function isAllFilter(value) {
 function getLedgerVouchers(importRunId, filters = {}) {
   const where = ["import_run_id = ?"];
   const params = [importRunId];
+  const sundryNames = getSundryCreditorNames(importRunId);
+  const hasCreditorRows = getRawCreditorRows(importRunId).length > 0;
+  if (hasCreditorRows && sundryNames.size === 0) {
+    where.push("1 = 0");
+  } else if (sundryNames.size > 0) {
+    where.push(`normalized_ledger_name IN (${Array.from(sundryNames).map(() => "?").join(",")})`);
+    params.push(...Array.from(sundryNames));
+  }
   const ledgerName = isAllFilter(filters.ledgerName) ? "" : filters.ledgerName;
   const voucherType = isAllFilter(filters.voucherType) ? "" : filters.voucherType;
 
@@ -300,11 +363,16 @@ function getLedgerVouchers(importRunId, filters = {}) {
 }
 
 function getAllLedgerVouchers(importRunId) {
-  return db.prepare(`
+  const sundryNames = getSundryCreditorNames(importRunId);
+  const hasCreditorRows = getRawCreditorRows(importRunId).length > 0;
+  const rows = db.prepare(`
     SELECT * FROM tally_ledger_vouchers
     WHERE import_run_id = ?
     ORDER BY voucher_date ASC, ledger_name ASC, voucher_number ASC
   `).all(importRunId).map(mapLedgerVoucher);
+  if (hasCreditorRows && !sundryNames.size) return [];
+  if (!sundryNames.size) return rows;
+  return rows.filter((row) => sundryNames.has(row.normalizedLedgerName || row.normalizedVendorName));
 }
 
 function getLedgerVoucherDiagnostics(importRunId) {
@@ -324,6 +392,7 @@ module.exports = {
   getRun,
   listRuns,
   getCreditors,
+  getIgnoredNonSundryCreditors,
   getLedgerVouchers,
   getAllLedgerVouchers,
   getLedgerVoucherDiagnostics,

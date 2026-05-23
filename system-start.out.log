@@ -1,0 +1,33 @@
+
+> msme-guard@0.1.0 start
+> concurrently "npm run start:backend" "npm run start:frontend"
+
+[0] 
+[0] > msme-guard@0.1.0 start:backend
+[0] > node backend/server.js
+[0] 
+[1] 
+[1] > msme-guard@0.1.0 start:frontend
+[1] > react-scripts start
+[1] 
+[0] MSME Guard backend running on http://127.0.0.1:3001
+[0] Forwarding Tally XML requests to http://127.0.0.1:9000
+[0] Backend PID 6516; Tally voucher exporter: batched, timeout 60000ms
+[0] [tally] configuredCompany="NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)" normalized="NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"
+[0] [tally-import] stage=processDiagnostics {"status":"ok","count":0}
+[1] (node:41068) [DEP_WEBPACK_DEV_SERVER_ON_AFTER_SETUP_MIDDLEWARE] DeprecationWarning: 'onAfterSetupMiddleware' option is deprecated. Please use the 'setupMiddlewares' option.
+[1] (Use `node --trace-deprecation ...` to show where the warning was created)
+[1] (node:41068) [DEP_WEBPACK_DEV_SERVER_ON_BEFORE_SETUP_MIDDLEWARE] DeprecationWarning: 'onBeforeSetupMiddleware' option is deprecated. Please use the 'setupMiddlewares' option.
+[1] Starting the development server...
+[1] 
+[1] Compiled successfully!
+[1] 
+[1] You can now view msme-guard in the browser.
+[1] 
+[1]   Local:            http://localhost:3000
+[1]   On Your Network:  http://192.168.1.37:3000
+[1] 
+[1] Note that the development build is not optimized.
+[1] To create a production build, use npm run build.
+[1] 
+[1] webpack compiled [1m[32msuccessfully[39m[22m

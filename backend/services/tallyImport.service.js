@@ -137,6 +137,9 @@ async function importFromTally({ fiscalYear, fromDate, toDate, asOn, companyName
       creditors: agedCreditors,
       ledgerVouchers: ledgerVoucherResult.rows,
     });
+    const persistedCreditors = importRepository.getCreditors(runId);
+    const ignoredNonSundry = importRepository.getIgnoredNonSundryCreditors(runId);
+    const seedSummary = vendorRepository.seedFromImport(runId, persistedCreditors, actor || "unknown");
     const ledgerVoucherDiagnostics = importRepository.getLedgerVoucherDiagnostics(runId);
     logImportStage("dbDiagnostics", {
       importRunId: runId,
@@ -153,9 +156,17 @@ async function importFromTally({ fiscalYear, fromDate, toDate, asOn, companyName
     logImportStage("persistImport", { status: "success", runId, persistedVoucherCount: ledgerVoucherDiagnostics.persistedVoucherCount });
     const run = importRepository.getRun(runId);
     const creditors = enrichCreditors(importRepository.getCreditors(runId));
+    const ignoredNonSundrySamples = ignoredNonSundry.slice(0, 10).map((row) => row.party);
     return {
       success: true,
-      importRun: run,
+      importRun: {
+        ...run,
+        summary: {
+          ...(run.summary || {}),
+          ignoredNonSundryCount: ignoredNonSundry.length,
+          ignoredNonSundrySamples,
+        },
+      },
       creditors,
       ledgerVoucherSummary: {
         totalRows: ledgerVoucherResult.rows.length,
@@ -166,7 +177,10 @@ async function importFromTally({ fiscalYear, fromDate, toDate, asOn, companyName
         fallbackUsed: ledgerVoucherResult.fallbackUsed,
       },
       ledgerVoucherDiagnostics,
+      seedSummary,
       warnings: ledgerVoucherResult.warnings,
+      ignoredNonSundryCount: ignoredNonSundry.length,
+      ignoredNonSundrySamples,
       verificationSummary: buildVerificationSummary(creditors),
     };
   } catch (error) {
@@ -180,11 +194,26 @@ function getImportRun(id) {
   const run = importRepository.getRun(id);
   if (!run) return null;
   const creditors = enrichCreditors(importRepository.getCreditors(id));
+  const ignoredNonSundry = importRepository.getIgnoredNonSundryCreditors(id);
   return {
-    importRun: run,
+    importRun: {
+      ...run,
+      summary: {
+        ...(run.summary || {}),
+        ignoredNonSundryCount: ignoredNonSundry.length,
+        ignoredNonSundrySamples: ignoredNonSundry.slice(0, 10).map((row) => row.party),
+      },
+    },
     creditors,
     verificationSummary: buildVerificationSummary(creditors),
   };
+}
+
+function seedVendorMasterFromImport(importRunId, actor = "unknown") {
+  const run = importRepository.getRun(importRunId);
+  if (!run) throw new Error("Import run not found");
+  if (run.status !== "completed") throw new Error("Import run is not completed");
+  return vendorRepository.seedFromImport(importRunId, importRepository.getCreditors(importRunId), actor);
 }
 
 function getLedgerVouchers(importRunId, filters = {}) {
@@ -200,4 +229,4 @@ function getLedgerVouchers(importRunId, filters = {}) {
   };
 }
 
-module.exports = { importFromTally, getImportRun, getLedgerVouchers, buildVerificationSummary, enrichCreditors, expectedDatesForFiscalYear };
+module.exports = { importFromTally, getImportRun, getLedgerVouchers, seedVendorMasterFromImport, buildVerificationSummary, enrichCreditors, expectedDatesForFiscalYear };

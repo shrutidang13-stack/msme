@@ -163,15 +163,31 @@ function enrichCreditorsWithVoucherAging(creditors = [], vouchers = [], asOn) {
     const normalizedVendorName = creditor.normalizedVendorName || normalizeVendorName(creditor.party || creditor.name);
     const aging = agingByVendor.get(normalizedVendorName);
     if (!aging) return { ...creditor, payableAging: null };
+    const ledgerOutstandingAmount = roundMoney(creditor.outstandingAmount);
+    const voucherOutstandingAmount = roundMoney(aging.outstandingAmount);
+    const outstandingMismatch = Math.abs(ledgerOutstandingAmount - voucherOutstandingAmount) >= 0.01;
+    const mismatchReason = outstandingMismatch
+      ? "Ledger closing balance differs from voucher-only outstanding"
+      : "";
     return {
       ...creditor,
-      outstandingAmount: aging.outstandingAmount,
+      outstandingAmount: ledgerOutstandingAmount,
+      ledgerOutstandingAmount,
+      voucherOutstandingAmount,
+      outstandingMismatch,
+      mismatchReason,
       daysOutstanding: aging.daysOutstanding,
       bucket: aging.bucket,
       delayed: aging.delayed,
       disallowanceAmount: aging.exposure43Bh,
       oldestInvoiceDate: aging.oldestInvoiceDate,
-      payableAging: aging,
+      payableAging: {
+        ...aging,
+        ledgerOutstandingAmount,
+        voucherOutstandingAmount,
+        outstandingMismatch,
+        mismatchReason,
+      },
     };
   });
 }
