@@ -39,10 +39,10 @@ export async function fetchHealth() {
   return response.json();
 }
 
-export async function importFromTally({ fiscalYear, fromDate, toDate, asOn, companyName }) {
+export async function importFromTally({ periodType, fiscalYear, fromDate, toDate, asOn, companyName }) {
   return request("/api/tally/import", {
     method: "POST",
-    body: JSON.stringify({ fiscalYear, fromDate, toDate, asOn, companyName }),
+    body: JSON.stringify({ periodType, fiscalYear, fromDate, toDate, asOn, companyName }),
   });
 }
 
@@ -103,6 +103,23 @@ export async function verifyPurchaseInvoiceUdyam(id, udyamNumber) {
 
 export async function fetchAuditTrail() {
   return request("/api/vendors/audit-trail");
+}
+
+export async function fetchDaybook(importRunId, params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "")).toString();
+  return request(`/api/tally/imports/${importRunId}/daybook${query ? `?${query}` : ""}`);
+}
+
+export async function fetchTrialBalance(importRunId) {
+  return request(`/api/tally/imports/${importRunId}/trial-balance`);
+}
+
+export async function fetchBalanceSheet(importRunId) {
+  return request(`/api/tally/imports/${importRunId}/balance-sheet`);
+}
+
+export async function fetchProfitLoss(importRunId) {
+  return request(`/api/tally/imports/${importRunId}/profit-loss`);
 }
 
 export async function fetchVerificationQueue() {

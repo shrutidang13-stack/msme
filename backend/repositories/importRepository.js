@@ -24,6 +24,7 @@ function mapRun(row) {
   return {
     id: row.id,
     fiscalYear: row.fiscal_year,
+    periodType: row.period_type || "financial_year",
     fromDate: row.from_date,
     toDate: row.to_date,
     asOn: row.as_on,
@@ -96,20 +97,23 @@ function mapLedgerVoucher(row) {
     amount: row.amount || 0,
     billReference: row.bill_reference || "",
     pendingAmount: row.pending_amount || 0,
+    partyLedgerName: row.party_ledger_name || "",
+    ledgerParent: row.ledger_parent || "",
+    groupHierarchy: parseJson(row.group_hierarchy_json, []),
     voucherSource: row.voucher_source || "Day Book",
     raw: parseJson(row.raw_json, {}),
     createdAt: row.created_at,
   };
 }
 
-function createRun({ fiscalYear, fromDate, toDate, asOn, companyName, status = "running", actor }) {
+function createRun({ fiscalYear, periodType = "financial_year", fromDate, toDate, asOn, companyName, status = "running", actor }) {
   const timestamp = nowIso();
   const id = crypto.randomUUID();
   db.prepare(`
     INSERT INTO tally_import_runs (
-      id, fiscal_year, from_date, to_date, as_on, company_name, status, summary_json, created_by, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, fiscalYear, fromDate, toDate, asOn, companyName || "", status, "{}", actor || "unknown", timestamp, timestamp);
+      id, fiscal_year, period_type, from_date, to_date, as_on, company_name, status, summary_json, created_by, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, fiscalYear, periodType, fromDate, toDate, asOn, companyName || "", status, "{}", actor || "unknown", timestamp, timestamp);
   return id;
 }
 
@@ -173,8 +177,9 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
       INSERT INTO tally_ledger_vouchers (
         id, import_run_id, fiscal_year, company_name, vendor_name, normalized_vendor_name,
         ledger_name, normalized_ledger_name, voucher_date, particulars, voucher_type,
-        voucher_number, debit, credit, amount, bill_reference, pending_amount, voucher_source, raw_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        voucher_number, debit, credit, amount, bill_reference, pending_amount, party_ledger_name,
+        ledger_parent, group_hierarchy_json, voucher_source, raw_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const timestamp = nowIso();
     const seenVouchers = new Set();
@@ -213,6 +218,9 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
         voucher.amount || Math.max(voucher.debit || 0, voucher.credit || 0),
         voucher.billReference || "",
         voucher.pendingAmount || 0,
+        voucher.partyLedgerName || "",
+        voucher.ledgerParent || "",
+        JSON.stringify(voucher.groupHierarchy || []),
         voucher.voucherSource || "Day Book",
         JSON.stringify(voucher.raw || voucher),
         timestamp
@@ -375,6 +383,43 @@ function getAllLedgerVouchers(importRunId) {
   return rows.filter((row) => sundryNames.has(row.normalizedLedgerName || row.normalizedVendorName));
 }
 
+function getDaybookVouchers(importRunId, filters = {}) {
+  const where = ["import_run_id = ?"];
+  const params = [importRunId];
+  if (filters.ledgerName) {
+    where.push("normalized_ledger_name = ?");
+    params.push(normalizeVendorName(filters.ledgerName));
+  }
+  if (filters.voucherType) {
+    where.push("LOWER(voucher_type) = LOWER(?)");
+    params.push(filters.voucherType);
+  }
+  if (filters.search) {
+    where.push("(LOWER(ledger_name) LIKE LOWER(?) OR LOWER(particulars) LIKE LOWER(?) OR LOWER(voucher_number) LIKE LOWER(?) OR LOWER(bill_reference) LIKE LOWER(?))");
+    const query = `%${filters.search}%`;
+    params.push(query, query, query, query);
+  }
+  const limit = Math.min(Math.max(parseInt(filters.limit, 10) || 250, 1), 1000);
+  const offset = Math.max(parseInt(filters.offset, 10) || 0, 0);
+  const whereSql = where.join(" AND ");
+  const rows = db.prepare(`
+    SELECT * FROM tally_ledger_vouchers
+    WHERE ${whereSql}
+    ORDER BY voucher_date ASC, ledger_name ASC, voucher_number ASC
+    LIMIT ? OFFSET ?
+  `).all(...params, limit, offset).map(mapLedgerVoucher);
+  const total = db.prepare(`SELECT COUNT(*) AS total FROM tally_ledger_vouchers WHERE ${whereSql}`).get(...params).total;
+  return { rows, total, limit, offset };
+}
+
+function getAllDaybookVouchers(importRunId) {
+  return db.prepare(`
+    SELECT * FROM tally_ledger_vouchers
+    WHERE import_run_id = ?
+    ORDER BY voucher_date ASC, ledger_name ASC, voucher_number ASC
+  `).all(importRunId).map(mapLedgerVoucher);
+}
+
 function getLedgerVoucherDiagnostics(importRunId) {
   const total = db.prepare("SELECT COUNT(*) AS total FROM tally_ledger_vouchers WHERE import_run_id = ?").get(importRunId).total;
   const sample = db.prepare("SELECT * FROM tally_ledger_vouchers WHERE import_run_id = ? ORDER BY voucher_date ASC, ledger_name ASC LIMIT 1").get(importRunId);
@@ -395,6 +440,8 @@ module.exports = {
   getIgnoredNonSundryCreditors,
   getLedgerVouchers,
   getAllLedgerVouchers,
+  getDaybookVouchers,
+  getAllDaybookVouchers,
   getLedgerVoucherDiagnostics,
   mapCreditor,
   mapLedgerVoucher,

@@ -31,3 +31,263 @@
 [1] To create a production build, use npm run build.
 [1] 
 [1] webpack compiled [1m[32msuccessfully[39m[22m
+[1] Compiling...
+[1] Compiled successfully!
+[1] webpack compiled [1m[32msuccessfully[39m[22m
+[1] Compiling...
+[1] Compiled with warnings.
+[1] 
+[1] [eslint] 
+[1] src\TallyImport.js
+[1]   Line 8:3:   'fetchBalanceSheet' is defined but never used   no-unused-vars
+[1]   Line 9:3:   'fetchDaybook' is defined but never used        no-unused-vars
+[1]   Line 11:3:  'fetchProfitLoss' is defined but never used     no-unused-vars
+[1]   Line 13:3:  'fetchTrialBalance' is defined but never used   no-unused-vars
+[1]   Line 36:7:  'CUSTOM_FY' is assigned a value but never used  no-unused-vars
+[1] 
+[1] Search for the keywords to learn more about each warning.
+[1] To ignore, add // eslint-disable-next-line to the line before.
+[1] 
+[1] [1m[33mWARNING[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 8:3:   'fetchBalanceSheet' is defined but never used   no-unused-vars
+[1]   Line 9:3:   'fetchDaybook' is defined but never used        no-unused-vars
+[1]   Line 11:3:  'fetchProfitLoss' is defined but never used     no-unused-vars
+[1]   Line 13:3:  'fetchTrialBalance' is defined but never used   no-unused-vars
+[1]   Line 36:7:  'CUSTOM_FY' is assigned a value but never used  no-unused-vars
+[1] 
+[1] [39m[22m
+[1] 
+[1] webpack compiled with [1m[33m1 warning[39m[22m
+[1] Compiling...
+[1] Failed to compile.
+[1] 
+[1] [eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each error.
+[1] [1m[33mWARNING[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 8:3:     'fetchBalanceSheet' is defined but never used           no-unused-vars
+[1]   Line 9:3:     'fetchDaybook' is defined but never used                no-unused-vars
+[1]   Line 11:3:    'fetchProfitLoss' is defined but never used             no-unused-vars
+[1]   Line 13:3:    'fetchTrialBalance' is defined but never used           no-unused-vars
+[1]   Line 36:7:    'CUSTOM_FY' is assigned a value but never used          no-unused-vars
+[1]   Line 157:22:  'setPeriodType' is assigned a value but never used      no-unused-vars
+[1]   Line 158:26:  'setCustomFromDate' is assigned a value but never used  no-unused-vars
+[1]   Line 159:24:  'setCustomToDate' is assigned a value but never used    no-unused-vars
+[1]   Line 174:10:  'reviewTab' is assigned a value but never used          no-unused-vars
+[1]   Line 174:21:  'setReviewTab' is assigned a value but never used       no-unused-vars
+[1]   Line 175:10:  'daybookRows' is assigned a value but never used        no-unused-vars
+[1]   Line 175:23:  'setDaybookRows' is assigned a value but never used     no-unused-vars
+[1]   Line 176:10:  'daybookTotal' is assigned a value but never used       no-unused-vars
+[1]   Line 176:24:  'setDaybookTotal' is assigned a value but never used    no-unused-vars
+[1]   Line 177:10:  'statements' is assigned a value but never used         no-unused-vars
+[1]   Line 177:22:  'setStatements' is assigned a value but never used      no-unused-vars
+[1] 
+[1] [39m[22m
+[1] 
+[1] [1m[31mERROR[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each [1m[31merror[39m[22m[1m.[39m[22m
+[1] 
+[1] webpack compiled with [1m[31m1 error[39m[22m and [1m[33m1 warning[39m[22m
+[1] Compiling...
+[1] Failed to compile.
+[1] 
+[1] [eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each error.
+[1] [1m[33mWARNING[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 36:7:    'CUSTOM_FY' is assigned a value but never used          no-unused-vars
+[1]   Line 157:22:  'setPeriodType' is assigned a value but never used      no-unused-vars
+[1]   Line 158:26:  'setCustomFromDate' is assigned a value but never used  no-unused-vars
+[1]   Line 159:24:  'setCustomToDate' is assigned a value but never used    no-unused-vars
+[1]   Line 174:10:  'reviewTab' is assigned a value but never used          no-unused-vars
+[1]   Line 174:21:  'setReviewTab' is assigned a value but never used       no-unused-vars
+[1]   Line 175:10:  'daybookRows' is assigned a value but never used        no-unused-vars
+[1]   Line 176:10:  'daybookTotal' is assigned a value but never used       no-unused-vars
+[1]   Line 177:10:  'statements' is assigned a value but never used         no-unused-vars
+[1] 
+[1] [39m[22m
+[1] 
+[1] [1m[31mERROR[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each [1m[31merror[39m[22m[1m.[39m[22m
+[1] 
+[1] webpack compiled with [1m[31m1 error[39m[22m and [1m[33m1 warning[39m[22m
+[1] Compiling...
+[1] Failed to compile.
+[1] 
+[1] [eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each error.
+[1] [1m[33mWARNING[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 174:10:  'reviewTab' is assigned a value but never used     no-unused-vars
+[1]   Line 174:21:  'setReviewTab' is assigned a value but never used  no-unused-vars
+[1]   Line 175:10:  'daybookRows' is assigned a value but never used   no-unused-vars
+[1]   Line 176:10:  'daybookTotal' is assigned a value but never used  no-unused-vars
+[1]   Line 177:10:  'statements' is assigned a value but never used    no-unused-vars
+[1] 
+[1] [39m[22m
+[1] 
+[1] [1m[31mERROR[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each [1m[31merror[39m[22m[1m.[39m[22m
+[1] 
+[1] webpack compiled with [1m[31m1 error[39m[22m and [1m[33m1 warning[39m[22m
+[1] Compiling...
+[1] Failed to compile.
+[1] 
+[1] [eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each error.
+[1] [1m[33mWARNING[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 174:10:  'reviewTab' is assigned a value but never used     no-unused-vars
+[1]   Line 174:21:  'setReviewTab' is assigned a value but never used  no-unused-vars
+[1]   Line 175:10:  'daybookRows' is assigned a value but never used   no-unused-vars
+[1]   Line 176:10:  'daybookTotal' is assigned a value but never used  no-unused-vars
+[1]   Line 177:10:  'statements' is assigned a value but never used    no-unused-vars
+[1] 
+[1] [39m[22m
+[1] 
+[1] [1m[31mERROR[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined  no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined  no-undef
+[1] 
+[1] Search for the keywords to learn more about each [1m[31merror[39m[22m[1m.[39m[22m
+[1] 
+[1] webpack compiled with [1m[31m1 error[39m[22m and [1m[33m1 warning[39m[22m
+[1] Compiling...
+[1] Failed to compile.
+[1] 
+[1] [eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined   no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined   no-undef
+[1]   Line 665:12:   'DerivedReviewTabs' is not defined  react/jsx-no-undef
+[1]   Line 726:12:   'DerivedReviewTabs' is not defined  react/jsx-no-undef
+[1] 
+[1] Search for the keywords to learn more about each error.
+[1] [1m[31mERROR[39m[22m in [1m[eslint] 
+[1] src\TallyImport.js
+[1]   Line 198:102:  'dateInputToTally' is not defined   no-undef
+[1]   Line 198:144:  'dateInputToTally' is not defined   no-undef
+[1]   Line 665:12:   'DerivedReviewTabs' is not defined  react/jsx-no-undef
+[1]   Line 726:12:   'DerivedReviewTabs' is not defined  react/jsx-no-undef
+[1] 
+[1] Search for the keywords to learn more about each [1m[31merror[39m[22m[1m.[39m[22m
+[1] 
+[1] webpack compiled with [1m[31m1 error[39m[22m
+[1] Compiling...
+[1] Compiled successfully!
+[1] webpack compiled [1m[32msuccessfully[39m[22m
+[0] [tally-import] stage=ping {"status":"start"}
+[0] [tally] GET http://localhost:9000 status=200 bodyPreview="<RESPONSE>TallyPrime Server is Running</RESPONSE>\r\n"
+[0] [tally-import] stage=ping {"status":"success","httpStatus":200}
+[0] [tally-import] stage=companyConfig {"envCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedEnvCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyDetect {"status":"selected","method":"request_override","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyContext {"selectedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)","injectedSVCURRENTCOMPANY":true,"exactInjectedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","method":"request_override"}
+[0] [tally-import] stage=xmlPostTest {"status":"start"}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<?xml version=\"1.0\" encoding=\"utf-8\"?><ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Accounts</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <TALLYREQUEST>Import Data</TALLYREQUEST>\r\n </HEADER>\r\n <BODY>\r\n  <IMPORTDATA>\r\n   <REQUESTDESC>\r\n    <REPORTNAME>All Masters</REPORTNAME>\r\n    <STATICVARIABLES>\r\n     <SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY>\r\n    </STATICVARIABLES>\r\n   </REQUESTDESC>\r\n   <REQUESTDATA>\r\n    <TALLYMESSAGE xmlns:UDF=\"TallyUDF\">\r\n     <CURRENCY NAME=\"?\" RESERVEDNAME=\"\">\r\n      <ACTIVEFROM/>\r\n      <ACTIVETO/>\r\n      <GUID>115c16c9-5d74-4be5-"
+[0] [tally-import] stage=xmlParse {"context":"List of Accounts health probe","parsedRows":1001}
+[0] [tally-import] stage=xmlPostTest {"status":"success","reportName":"List of Accounts","parsedRows":1001}
+[0] [tally-import] stage=ping {"status":"preflight_start","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474"}
+[0] [tally-import] stage=ping {"status":"start"}
+[0] [tally] GET http://localhost:9000 status=200 bodyPreview="<RESPONSE>TallyPrime Server is Running</RESPONSE>\r\n"
+[0] [tally-import] stage=ping {"status":"success","httpStatus":200}
+[0] [tally-import] stage=companyConfig {"envCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedEnvCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyDetect {"status":"selected","method":"request_override","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyContext {"selectedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)","injectedSVCURRENTCOMPANY":true,"exactInjectedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","method":"request_override"}
+[0] [tally-import] stage=xmlPostTest {"status":"start"}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<?xml version=\"1.0\" encoding=\"utf-8\"?><ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Accounts</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <TALLYREQUEST>Import Data</TALLYREQUEST>\r\n </HEADER>\r\n <BODY>\r\n  <IMPORTDATA>\r\n   <REQUESTDESC>\r\n    <REPORTNAME>All Masters</REPORTNAME>\r\n    <STATICVARIABLES>\r\n     <SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY>\r\n    </STATICVARIABLES>\r\n   </REQUESTDESC>\r\n   <REQUESTDATA>\r\n    <TALLYMESSAGE xmlns:UDF=\"TallyUDF\">\r\n     <CURRENCY NAME=\"?\" RESERVEDNAME=\"\">\r\n      <ACTIVEFROM/>\r\n      <ACTIVETO/>\r\n      <GUID>115c16c9-5d74-4be5-"
+[0] [tally-import] stage=xmlParse {"context":"List of Accounts health probe","parsedRows":1001}
+[0] [tally-import] stage=xmlPostTest {"status":"success","reportName":"List of Accounts","parsedRows":1001}
+[0] [tally-import] stage=ping {"status":"preflight_result","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","reachable":true,"portOpen":true,"serverRunning":true,"xmlPostWorking":true,"companyDetected":true,"message":"Tally server is running","error":null}
+[0] [tally-import] stage=creditorsExport {"status":"start","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474"}
+[0] [tally-import] stage=companyConfig {"envCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedEnvCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyDetect {"status":"selected","method":"request_override","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyContext {"selectedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)","injectedSVCURRENTCOMPANY":true,"exactInjectedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","method":"request_override"}
+[0] [tally-import] stage=creditorsExport {"status":"start","from":"20250401","to":"20260331","group":"Sundry Creditors","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","primaryExportPath":"Ledger Master Collection"}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<?xml version=\"1.0\" encoding=\"utf-8\"?><ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>List of Accounts</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <TALLYREQUEST>Import Data</TALLYREQUEST>\r\n </HEADER>\r\n <BODY>\r\n  <IMPORTDATA>\r\n   <REQUESTDESC>\r\n    <REPORTNAME>All Masters</REPORTNAME>\r\n    <STATICVARIABLES>\r\n     <SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY>\r\n    </STATICVARIABLES>\r\n   </REQUESTDESC>\r\n   <REQUESTDATA>\r\n    <TALLYMESSAGE xmlns:UDF=\"TallyUDF\">\r\n     <CURRENCY NAME=\"?\" RESERVEDNAME=\"\">\r\n      <ACTIVEFROM/>\r\n      <ACTIVETO/>\r\n      <GUID>115c16c9-5d74-4be5-"
+[0] [tally-import] stage=xmlParse {"context":"List of Accounts","parsedRows":1001}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Ledger Master Collection</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME=\"MSME Ledger Master Collection\" ISMODIFY=\"No\"><TYPE>Ledger</TYPE><FETCH>Name,Parent,OpeningBalance,ClosingBalance,IsBillWiseOn,Guid,GSTIN,G"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <VERSION>1</VERSION>\r\n  <STATUS>1</STATUS>\r\n </HEADER>\r\n <BODY>\r\n  <DESC>\r\n   <CMPINFO>\r\n    <COMPANY>0</COMPANY>\r\n    <GROUP>0</GROUP>\r\n    <LEDGER>0</LEDGER>\r\n    <COSTCATEGORY>0</COSTCATEGORY>\r\n    <COSTCENTRE>0</COSTCENTRE>\r\n    <GODOWN>0</GODOWN>\r\n    <STOCKGROUP>0</STOCKGROUP>\r\n    <STOCKCATEGORY>0</STOCKCATEGORY>\r\n    <STOCKITEM>0</STOCKITEM>\r\n    <VOUCHERTYPE>0</VOUCHERTYPE>\r\n    <CURRENCY>0</CURRENCY>\r\n    <UNIT>0</UNIT>\r\n    <BUDGET>0</BUDGET>\r\n    <CLIENTRULE>"
+[0] [tally-import] stage=xmlParse {"context":"Ledger Master Collection balance enrichment","parsedRows":936}
+[0] [tally-import] stage=xmlParse {"context":"List of Accounts","parsedRows":937}
+[0] [tally-import] stage=xmlParse {"context":"List of Accounts","parsedRows":937}
+[0] [tally-import] stage=creditorsExport {"status":"balance_enriched","source":"Ledger Master Collection","enrichedCount":27}
+[0] [tally-import] stage=creditorsExport {"status":"classified","source":"ledger_master_collection","primaryExportPathUsed":"Ledger Master Collection","groupSummaryFallback":"skipped","fallbackSkippedReason":"List of Accounts remains the stable creditor classification source","totalLedgersExported":935,"detectedCreditorCount":27,"skippedLedgerCount":908,"sampleParentNames":["Advance From Customers","Advance From Dealer","Advance to Supplier","Axcelgro LLP","Bank Accounts","Bank OD A/c","Business Promotion","Capital Account","Cash-in-Hand","Computer & Software","Current Assets","Current Liabilities","Deffered Tax","Direct Expenses","Direct Incomes","Duties & Taxes","EMPLOYEE ESIC@0.75%","ESIC EMPLOYER CONTRIBUTION","Expenses Payable","Finance Charges"],"detectedParentNames":["Sundry Creditors"],"filteredNonCreditBalanceCount":0}
+[0] [tally-import] stage=creditorsExport {"status":"success","source":"ledger_master_collection","primaryExportPathUsed":"Ledger Master Collection","groupSummaryFallback":"skipped","count":27,"diagnostics":{"totalLedgersExported":935,"skippedLedgerCount":908,"detectedParentNames":["Sundry Creditors"]}}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<?xml version=\"1.0\" encoding=\"utf-8\"?><ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY><SVFROMDATE>20250401</SVFROMDATE><SVTODATE>20260331</SVTODATE></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <TALLYREQUEST>Import Data</TALLYREQUEST>\r\n </HEADER>\r\n <BODY>\r\n  <IMPORTDATA>\r\n   <REQUESTDESC>\r\n    <REPORTNAME>All Masters</REPORTNAME>\r\n    <STATICVARIABLES>\r\n     <SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY>\r\n    </STATICVARIABLES>\r\n   </REQUESTDESC>\r\n   <REQUESTDATA>\r\n    <TALLYMESSAGE xmlns:UDF=\"TallyUDF\">\r\n     <VOUCHER REMOTEID=\"115c16c9-5d74-4be5-8529-f77b07bf68d9-000041b2\" VCHKEY=\"115c16c9-5d74-4be5-8529-f77b07bf68"
+[0] [tally-import] stage=companyDetect {"status":"creditor_export_fallback","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","companyDetected":true,"companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","fallbackMethodUsed":"request_override"}
+[0] [tally-import] stage=creditorsExport {"status":"success","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","count":27}
+[0] [tally-import] stage=vouchersExport {"status":"start","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","creditorCount":27}
+[0] [tally-import] stage=companyConfig {"envCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedEnvCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyDetect {"status":"selected","method":"request_override","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally-import] stage=companyContext {"selectedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedCompany":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)","injectedSVCURRENTCOMPANY":true,"exactInjectedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","method":"request_override"}
+[0] [tally-import] stage=vouchersExport {"status":"start","creditorCount":27,"batchCount":4,"from":"20250401","to":"20260331","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)"}
+[0] [tally-import] stage=vouchersExport {"status":"batch_start","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Apr-Jun","from":"20250401","to":"20250630"}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Voucher Collection</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY><SVFROMDATE>20250401</SVFROMDATE><SVTODATE>20250630</SVTODATE></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME=\"MSME Voucher Collection\" ISMODIFY=\"No\"><TYPE>Voucher</TYPE><FILTERS>MSMEVoucherDat"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <VERSION>1</VERSION>\r\n  <STATUS>1</STATUS>\r\n </HEADER>\r\n <BODY>\r\n  <DESC>\r\n   <CMPINFO>\r\n    <COMPANY>0</COMPANY>\r\n    <GROUP>0</GROUP>\r\n    <LEDGER>0</LEDGER>\r\n    <COSTCATEGORY>0</COSTCATEGORY>\r\n    <COSTCENTRE>0</COSTCENTRE>\r\n    <GODOWN>0</GODOWN>\r\n    <STOCKGROUP>0</STOCKGROUP>\r\n    <STOCKCATEGORY>0</STOCKCATEGORY>\r\n    <STOCKITEM>0</STOCKITEM>\r\n    <VOUCHERTYPE>0</VOUCHERTYPE>\r\n    <CURRENCY>0</CURRENCY>\r\n    <UNIT>0</UNIT>\r\n    <BUDGET>0</BUDGET>\r\n    <CLIENTRULE>"
+[0] [tally-import] stage=vouchersExport {"status":"batch_end","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Apr-Jun","from":"20250401","to":"20250630","responseSize":17056111,"elapsedMs":9433,"exportedVoucherCount":616,"parsedVoucherCount":50,"voucherCount":50,"truncated":false}
+[0] [tally-import] stage=vouchersExport {"status":"batch_start","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Jul-Sep","from":"20250701","to":"20250930"}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Voucher Collection</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY><SVFROMDATE>20250701</SVFROMDATE><SVTODATE>20250930</SVTODATE></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME=\"MSME Voucher Collection\" ISMODIFY=\"No\"><TYPE>Voucher</TYPE><FILTERS>MSMEVoucherDat"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <VERSION>1</VERSION>\r\n  <STATUS>1</STATUS>\r\n </HEADER>\r\n <BODY>\r\n  <DESC>\r\n   <CMPINFO>\r\n    <COMPANY>0</COMPANY>\r\n    <GROUP>0</GROUP>\r\n    <LEDGER>0</LEDGER>\r\n    <COSTCATEGORY>0</COSTCATEGORY>\r\n    <COSTCENTRE>0</COSTCENTRE>\r\n    <GODOWN>0</GODOWN>\r\n    <STOCKGROUP>0</STOCKGROUP>\r\n    <STOCKCATEGORY>0</STOCKCATEGORY>\r\n    <STOCKITEM>0</STOCKITEM>\r\n    <VOUCHERTYPE>0</VOUCHERTYPE>\r\n    <CURRENCY>0</CURRENCY>\r\n    <UNIT>0</UNIT>\r\n    <BUDGET>0</BUDGET>\r\n    <CLIENTRULE>"
+[0] [tally-import] stage=vouchersExport {"status":"batch_end","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Jul-Sep","from":"20250701","to":"20250930","responseSize":22276829,"elapsedMs":8420,"exportedVoucherCount":745,"parsedVoucherCount":97,"voucherCount":97,"truncated":false}
+[0] [tally-import] stage=vouchersExport {"status":"batch_start","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Oct-Dec","from":"20251001","to":"20251231"}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Voucher Collection</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY><SVFROMDATE>20251001</SVFROMDATE><SVTODATE>20251231</SVTODATE></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME=\"MSME Voucher Collection\" ISMODIFY=\"No\"><TYPE>Voucher</TYPE><FILTERS>MSMEVoucherDat"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <VERSION>1</VERSION>\r\n  <STATUS>1</STATUS>\r\n </HEADER>\r\n <BODY>\r\n  <DESC>\r\n   <CMPINFO>\r\n    <COMPANY>0</COMPANY>\r\n    <GROUP>0</GROUP>\r\n    <LEDGER>0</LEDGER>\r\n    <COSTCATEGORY>0</COSTCATEGORY>\r\n    <COSTCENTRE>0</COSTCENTRE>\r\n    <GODOWN>0</GODOWN>\r\n    <STOCKGROUP>0</STOCKGROUP>\r\n    <STOCKCATEGORY>0</STOCKCATEGORY>\r\n    <STOCKITEM>0</STOCKITEM>\r\n    <VOUCHERTYPE>0</VOUCHERTYPE>\r\n    <CURRENCY>0</CURRENCY>\r\n    <UNIT>0</UNIT>\r\n    <BUDGET>0</BUDGET>\r\n    <CLIENTRULE>"
+[0] [tally-import] stage=vouchersExport {"status":"batch_end","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Oct-Dec","from":"20251001","to":"20251231","responseSize":30612189,"elapsedMs":12744,"exportedVoucherCount":806,"parsedVoucherCount":83,"voucherCount":83,"truncated":false}
+[0] [tally-import] stage=vouchersExport {"status":"batch_start","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Jan-Mar","from":"20260101","to":"20260331"}
+[0] [tally-import] stage=companyContextAttempt {"attemptedSVCURRENTCOMPANY":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","normalizedAttempt":"NXTMOBILITY ENERGY PRIVATE LIMITED - (FROM 1-APR-2023)"}
+[0] [tally] POST http://localhost:9000 requestPreview="<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Voucher Collection</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVCURRENTCOMPANY>NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)</SVCURRENTCOMPANY><SVFROMDATE>20260101</SVFROMDATE><SVTODATE>20260331</SVTODATE></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME=\"MSME Voucher Collection\" ISMODIFY=\"No\"><TYPE>Voucher</TYPE><FILTERS>MSMEVoucherDat"
+[0] [tally] POST http://localhost:9000 status=200 bodyPreview="<ENVELOPE>\r\n <HEADER>\r\n  <VERSION>1</VERSION>\r\n  <STATUS>1</STATUS>\r\n </HEADER>\r\n <BODY>\r\n  <DESC>\r\n   <CMPINFO>\r\n    <COMPANY>0</COMPANY>\r\n    <GROUP>0</GROUP>\r\n    <LEDGER>0</LEDGER>\r\n    <COSTCATEGORY>0</COSTCATEGORY>\r\n    <COSTCENTRE>0</COSTCENTRE>\r\n    <GODOWN>0</GODOWN>\r\n    <STOCKGROUP>0</STOCKGROUP>\r\n    <STOCKCATEGORY>0</STOCKCATEGORY>\r\n    <STOCKITEM>0</STOCKITEM>\r\n    <VOUCHERTYPE>0</VOUCHERTYPE>\r\n    <CURRENCY>0</CURRENCY>\r\n    <UNIT>0</UNIT>\r\n    <BUDGET>0</BUDGET>\r\n    <CLIENTRULE>"
+[0] [tally-import] stage=vouchersExport {"status":"batch_end","primaryExportPath":"Voucher Collection","mode":"quarter","label":"Jan-Mar","from":"20260101","to":"20260331","responseSize":19012788,"elapsedMs":6785,"exportedVoucherCount":559,"parsedVoucherCount":42,"voucherCount":42,"truncated":false}
+[0] [tally-import] stage=vouchersExport {"status":"success","exportedVoucherCount":272,"parsedVoucherCount":272,"dedupedVoucherCount":204,"voucherSource":"Voucher Collection","fallbackUsed":false,"rows":204,"warnings":0}
+[0] [tally-import] stage=vouchersExport {"status":"success","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","exportedVoucherCount":204,"parsedVoucherCount":204,"importRunId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","rows":204,"warnings":0,"voucherSource":"Voucher Collection","fallbackUsed":false}
+[0] [tally-import] stage=persistImport {"status":"start","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474"}
+[0] [tally-import] stage=voucherPersist {"status":"start","importRunId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","fiscalYear":"2025-26","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","exportedVoucherCount":204,"parsedVoucherCount":204}
+[0] [tally-import] stage=voucherPersist {"status":"success","importRunId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","fiscalYear":"2025-26","companyName":"NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)","persistedVoucherCount":204,"duplicateVouchersSkipped":0,"sampleVoucher":{"ledgerName":"Hindustan Power Green Vehicles Pvt Ltd","date":"2025-04-01","voucherType":"Purchase","voucherNumber":"661167973","billReference":"661167973","voucherSource":"Voucher Collection","amount":592554}}
+[0] [tally-import] stage=dbDiagnostics {"importRunId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","voucherCountAfterImport":204,"sampleVoucher":{"ledgerName":"Hindustan Power Green Vehicles Pvt Ltd","date":"2025-04-01","voucherType":"Purchase","voucherNumber":"661167973","billReference":"661167973","amount":592554}}
+[0] [tally-import] stage=persistImport {"status":"success","runId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","persistedVoucherCount":204}
+[0] [tally-import] stage=voucherQuery {"status":"start","importRunId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","fiscalYear":"2025-26"}
+[0] [tally-import] stage=voucherQuery {"importRunId":"f5eedc05-5bc4-4229-b161-38f73ddfe474","filters":{"ledgerName":null,"voucherType":null,"fromDate":null,"toDate":null,"search":null},"queriedVoucherCount":204,"total":204,"limit":250,"offset":0,"sampleVoucher":{"ledgerName":"Hindustan Power Green Vehicles Pvt Ltd","date":"2025-04-01","voucherType":"Purchase","voucherNumber":"661167973","billReference":"661167973","voucherSource":"Voucher Collection","amount":592554}}
+[0] npm run start:backend exited with code 4294967295
+[1] npm run start:frontend exited with code 1073807364

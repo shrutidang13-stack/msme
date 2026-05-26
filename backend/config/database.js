@@ -50,6 +50,7 @@ function migrate() {
     CREATE TABLE IF NOT EXISTS tally_import_runs (
       id TEXT PRIMARY KEY,
       fiscal_year TEXT NOT NULL,
+      period_type TEXT NOT NULL DEFAULT 'financial_year',
       from_date TEXT NOT NULL,
       to_date TEXT NOT NULL,
       as_on TEXT NOT NULL,
@@ -106,6 +107,9 @@ function migrate() {
       amount REAL NOT NULL DEFAULT 0,
       bill_reference TEXT,
       pending_amount REAL NOT NULL DEFAULT 0,
+      party_ledger_name TEXT NOT NULL DEFAULT '',
+      ledger_parent TEXT NOT NULL DEFAULT '',
+      group_hierarchy_json TEXT NOT NULL DEFAULT '[]',
       voucher_source TEXT NOT NULL DEFAULT 'Day Book',
       raw_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
@@ -232,7 +236,14 @@ function migrate() {
     ["normalized_vendor_name", "normalized_vendor_name TEXT NOT NULL DEFAULT ''"],
     ["bill_reference", "bill_reference TEXT"],
     ["pending_amount", "pending_amount REAL NOT NULL DEFAULT 0"],
+    ["party_ledger_name", "party_ledger_name TEXT NOT NULL DEFAULT ''"],
+    ["ledger_parent", "ledger_parent TEXT NOT NULL DEFAULT ''"],
+    ["group_hierarchy_json", "group_hierarchy_json TEXT NOT NULL DEFAULT '[]'"],
     ["voucher_source", "voucher_source TEXT NOT NULL DEFAULT 'Day Book'"],
+  ]);
+
+  addMissingColumns("tally_import_runs", [
+    ["period_type", "period_type TEXT NOT NULL DEFAULT 'financial_year'"],
   ]);
 
   addMissingColumns("tally_import_creditors", [

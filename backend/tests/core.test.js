@@ -30,6 +30,7 @@ const {
 } = require("../services/tally.service");
 const { createMSMEReport, calculateExcludedRows, calculateReportRows, buildEvidenceBundle, toCsv, toTallyReconciliationCsv } = require("../services/report.service");
 const { buildPayableAgingFromVouchers, enrichCreditorsWithVoucherAging } = require("../services/payableAging.service");
+const { buildTrialBalance, buildBalanceSheet, buildProfitLoss, deriveSundryCreditors } = require("../services/financialStatements.service");
 const { evaluateVendor, loadRulePack } = require("../services/msmeRuleEngine.service");
 const { calculateMSMEInterest } = require("../services/interestCalculator.service");
 const vendorRepository = require("../repositories/vendorRepository");
@@ -296,6 +297,62 @@ test("builds financial-year voucher batches by quarter", () => {
   assert.deepEqual(batches.map((batch) => batch.label), ["Apr-Jun", "Jul-Sep", "Oct-Dec", "Jan-Mar"]);
   assert.equal(batches[0].from, "20250401");
   assert.equal(batches[3].to, "20260331");
+});
+
+test("custom import period accepts arbitrary valid date range and rejects reversed dates", () => {
+  assert.deepEqual(
+    tallyImportService.assertImportPeriod({
+      periodType: "custom",
+      fiscalYear: "custom",
+      fromDate: "2025-05-01",
+      toDate: "2025-05-31",
+    }),
+    { fromDate: "20250501", toDate: "20250531" }
+  );
+  assert.throws(
+    () => tallyImportService.assertImportPeriod({
+      periodType: "custom",
+      fiscalYear: "custom",
+      fromDate: "20250531",
+      toDate: "20250501",
+    }),
+    /fromDate must be before or equal to toDate/
+  );
+});
+
+test("parses full Day Book voucher collection rows for non-creditor and creditor ledgers", () => {
+  const xml = `<ENVELOPE><VOUCHER VCHTYPE="Purchase">
+    <DATE>20250502</DATE>
+    <VOUCHERNUMBER>PB-FULL</VOUCHERNUMBER>
+    <PARTYLEDGERNAME>Acme Supplier</PARTYLEDGERNAME>
+    <ALLLEDGERENTRIES.LIST><LEDGERNAME>Acme Supplier</LEDGERNAME><AMOUNT>-1400.00</AMOUNT></ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST><LEDGERNAME>Purchase Accounts</LEDGERNAME><AMOUNT>1400.00</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER></ENVELOPE>`;
+  const rows = parseVoucherCollection(xml);
+  assert.deepEqual(rows.map((row) => row.ledgerName), ["Acme Supplier", "Purchase Accounts"]);
+  assert.equal(rows[0].credit, 1400);
+  assert.equal(rows[1].debit, 1400);
+});
+
+test("derived statements and creditors use ledger metadata with activity review bucket", () => {
+  const ledgers = [
+    { name: "Activity Supplier", parent: "Sundry Creditors", groupHierarchy: ["Sundry Creditors"], openingBalance: 0, closingBalance: 0, isSundryCreditor: true },
+    { name: "Purchase Accounts", parent: "Purchase Accounts", groupHierarchy: ["Purchase Accounts"], openingBalance: 0, closingBalance: 500 },
+  ];
+  const vouchers = [
+    { ledgerName: "Activity Supplier", normalizedLedgerName: "ACTIVITY SUPPLIER", date: "2025-04-01", voucherType: "Purchase", credit: 500, amount: 500 },
+    { ledgerName: "Purchase Accounts", normalizedLedgerName: "PURCHASE ACCOUNTS", date: "2025-04-01", voucherType: "Purchase", debit: 500, amount: 500 },
+  ];
+  const trial = buildTrialBalance(vouchers, ledgers);
+  const balance = buildBalanceSheet(vouchers, ledgers);
+  const profit = buildProfitLoss(vouchers, ledgers);
+  const creditors = deriveSundryCreditors(ledgers, vouchers);
+  assert.equal(trial.summary.totalDebit, 500);
+  assert.equal(trial.summary.totalCredit, 500);
+  assert.equal(balance.summary.groupCount >= 1, true);
+  assert.equal(profit.summary.groupCount >= 1, true);
+  assert.equal(creditors.length, 1);
+  assert.equal(creditors[0].reviewReason, "current_activity_without_credit_closing");
 });
 
 test("export builders inject explicit SVCURRENTCOMPANY", () => {

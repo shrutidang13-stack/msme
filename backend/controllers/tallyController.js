@@ -29,12 +29,13 @@ async function companyContext(req, res, next) {
 
 async function importTally(req, res, next) {
   try {
-    const { fiscalYear, fromDate, toDate, asOn, companyName } = req.body || {};
+    const { periodType, fiscalYear, fromDate, toDate, asOn, companyName } = req.body || {};
     if (!fiscalYear || !fromDate || !toDate) {
       return res.status(400).json({ success: false, error: "fiscalYear, fromDate, and toDate are required" });
     }
     const result = await tallyImportService.importFromTally({
       fiscalYear,
+      periodType,
       fromDate,
       toDate,
       asOn,
@@ -45,6 +46,28 @@ async function importTally(req, res, next) {
   } catch (error) {
     next(error);
   }
+}
+
+async function getDaybook(req, res, next) {
+  try {
+    const result = tallyImportService.getDaybook(req.params.id, req.query || {});
+    if (!result) return res.status(404).json({ success: false, error: "Import run not found" });
+    res.json({ success: true, ...result });
+  } catch (error) {
+    next(error);
+  }
+}
+
+function statementHandler(type) {
+  return (req, res, next) => {
+    try {
+      const result = tallyImportService.getStatement(req.params.id, type);
+      if (!result) return res.status(404).json({ success: false, error: "Import run not found" });
+      res.json({ success: true, ...result });
+    } catch (error) {
+      next(error);
+    }
+  };
 }
 
 async function getImport(req, res, next) {
@@ -75,4 +98,16 @@ async function listImports(req, res, next) {
   }
 }
 
-module.exports = { status, health, companyContext, importTally, getImport, getLedgerVouchers, listImports };
+module.exports = {
+  status,
+  health,
+  companyContext,
+  importTally,
+  getImport,
+  getLedgerVouchers,
+  getDaybook,
+  getTrialBalance: statementHandler("trial-balance"),
+  getBalanceSheet: statementHandler("balance-sheet"),
+  getProfitLoss: statementHandler("profit-loss"),
+  listImports,
+};
