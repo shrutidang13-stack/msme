@@ -5,8 +5,12 @@ import {
   createMSMEReport,
   downloadReportFile,
   downloadUrl,
+  fetchBalanceSheet,
+  fetchDaybook,
   fetchLedgerVouchers,
+  fetchProfitLoss,
   fetchTallyHealth,
+  fetchTrialBalance,
   importFromTally,
   importUdyamRowsLive,
   markZeroOutstandingNotRequired,
@@ -15,22 +19,21 @@ import {
 } from "./services/api";
 import { useVendorVerification } from "./hooks/useVendorVerification";
 
-const FY_CONFIG = {
-  "2025-26": {
-    label: "FY 2025-26",
-    act: "Income Tax Act, 1961",
-    section: "Section 43B(h)",
-    fromDate: "20250401",
-    toDate: "20260331",
-  },
-  "2026-27": {
-    label: "FY 2026-27",
-    act: "Income Tax Act, 2025",
-    section: "Section 37(2)(g)",
-    fromDate: "20260401",
-    toDate: "20270331",
-  },
-};
+const FY_CONFIG = Object.fromEntries(
+  Array.from({ length: 8 }, (_, index) => {
+    const startYear = 2019 + index;
+    const key = `${startYear}-${String((startYear + 1) % 100).padStart(2, "0")}`;
+    const isNewAct = startYear >= 2026;
+    return [key, {
+      label: `FY ${key}`,
+      act: isNewAct ? "Income Tax Act, 2025" : "Income Tax Act, 1961",
+      section: isNewAct ? "Section 37(2)(g)" : "Section 43B(h)",
+      fromDate: `${startYear}0401`,
+      toDate: `${startYear + 1}0331`,
+    }];
+  })
+);
+const CUSTOM_FY = "custom";
 
 const VOUCHER_PROGRESS_LABELS = ["Apr-Jun", "Jul-Sep", "Oct-Dec", "Jan-Mar"];
 const VOUCHER_PAGE_SIZE = 250;
@@ -151,6 +154,9 @@ function downloadUdyamTemplate() {
 export default function TallyImport() {
   const [vendors, setVendors] = useState([]);
   const [selectedFY, setSelectedFY] = useState(getCurrentFinancialYear());
+  const [periodType, setPeriodType] = useState("financial_year");
+  const [customFromDate, setCustomFromDate] = useState(toDateInput(FY_CONFIG[getCurrentFinancialYear()]?.fromDate));
+  const [customToDate, setCustomToDate] = useState(toDateInput(FY_CONFIG[getCurrentFinancialYear()]?.toDate));
   const [asOnDate, setAsOnDate] = useState(defaultAsOnDate(getCurrentFinancialYear()));
   const [importRun, setImportRun] = useState(null);
   const [step, setStep] = useState(1);
@@ -165,6 +171,10 @@ export default function TallyImport() {
   const [voucherPage, setVoucherPage] = useState(1);
   const [importWarnings, setImportWarnings] = useState([]);
   const [voucherFilters, setVoucherFilters] = useState({ search: "", ledgerName: "", voucherType: "" });
+  const [reviewTab, setReviewTab] = useState("daybook");
+  const [daybookRows, setDaybookRows] = useState([]);
+  const [daybookTotal, setDaybookTotal] = useState(0);
+  const [statements, setStatements] = useState({ trialBalance: null, balanceSheet: null, profitLoss: null });
   const [udyamCsv, setUdyamCsv] = useState("");
   const [udyamRows, setUdyamRows] = useState([]);
   const [udyamFileName, setUdyamFileName] = useState("");
@@ -183,7 +193,10 @@ export default function TallyImport() {
     statsFor,
   } = useVendorVerification();
 
-  const fyConfig = FY_CONFIG[selectedFY];
+  const isCustomPeriod = periodType === "custom";
+  const fyConfig = isCustomPeriod
+    ? { label: "Custom", act: "Income Tax Act, 1961 / 2025", section: "MSME payment rule", fromDate: dateInputToTally(customFromDate), toDate: dateInputToTally(customToDate) }
+    : FY_CONFIG[selectedFY];
   const creditorVendors = useMemo(() => vendors.filter((vendor) => vendor.isSundryCreditor), [vendors]);
   const verificationStats = statsFor(creditorVendors);
   const workflowStats = useMemo(() => buildWorkflowStats(creditorVendors), [creditorVendors]);
@@ -209,6 +222,9 @@ export default function TallyImport() {
     setReport(null);
     setLedgerVouchers([]);
     setLedgerVoucherTotal(0);
+    setDaybookRows([]);
+    setDaybookTotal(0);
+    setStatements({ trialBalance: null, balanceSheet: null, profitLoss: null });
     setVoucherPage(1);
     setImportWarnings([]);
     setNotice("");
@@ -219,6 +235,22 @@ export default function TallyImport() {
 
   const patchVendorMaster = (vendorName, vendorMaster) => {
     setVendors((prev) => prev.map((vendor) => (vendor.name === vendorName ? { ...vendor, vendorMaster } : vendor)));
+  };
+
+  const loadDerivedViews = async (runId) => {
+    const [daybookResponse, trialResponse, balanceResponse, profitResponse] = await Promise.all([
+      fetchDaybook(runId, { limit: VOUCHER_PAGE_SIZE, offset: 0 }),
+      fetchTrialBalance(runId),
+      fetchBalanceSheet(runId),
+      fetchProfitLoss(runId),
+    ]);
+    setDaybookRows(daybookResponse.daybook?.rows || []);
+    setDaybookTotal(daybookResponse.daybook?.total || 0);
+    setStatements({
+      trialBalance: trialResponse.statement,
+      balanceSheet: balanceResponse.statement,
+      profitLoss: profitResponse.statement,
+    });
   };
 
   const loadVoucherPage = async (runId, page = 1, filters = voucherFilters) => {
@@ -326,7 +358,8 @@ export default function TallyImport() {
         progressIndex += 1;
       }, 2500);
       const data = await importFromTally({
-        fiscalYear: selectedFY,
+        periodType,
+        fiscalYear: isCustomPeriod ? "custom" : selectedFY,
         fromDate: fyConfig.fromDate,
         toDate: fyConfig.toDate,
         asOn: asOnDate,
@@ -354,6 +387,7 @@ export default function TallyImport() {
       });
       setLedgerVouchers(voucherResponse.ledgerVouchers?.rows || voucherResponse.rows || []);
       setLedgerVoucherTotal(voucherResponse.ledgerVouchers?.total ?? voucherResponse.total ?? 0);
+      await loadDerivedViews(data.importRun.id);
       setVoucherPage(1);
       setImportStatus("Import complete");
       setStep(2);
@@ -513,37 +547,53 @@ export default function TallyImport() {
       )}
 
       <div className="rounded-2xl p-4 mb-4 border border-blue-200 bg-blue-50">
-        <div className="flex items-center gap-4 flex-wrap">
-          <p className="font-bold text-blue-700">Financial Year:</p>
-          {Object.keys(FY_CONFIG).map((fy) => (
-            <button
-              key={fy}
-              onClick={() => {
-                setSelectedFY(fy);
-                setAsOnDate(defaultAsOnDate(fy));
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+          <label className="block text-sm font-semibold text-blue-700">
+            Financial Year
+            <select
+              value={isCustomPeriod ? CUSTOM_FY : selectedFY}
+              onChange={(event) => {
+                const value = event.target.value;
+                const nextCustom = value === CUSTOM_FY;
+                setPeriodType(nextCustom ? "custom" : "financial_year");
+                if (!nextCustom) {
+                  setSelectedFY(value);
+                  setAsOnDate(defaultAsOnDate(value));
+                }
                 resetAll();
               }}
-              className={`px-4 py-2 rounded-lg font-semibold text-sm border-2 ${
-                selectedFY === fy ? "bg-blue-700 text-white border-blue-700" : "bg-white text-gray-600 border-gray-200"
-              }`}>
-              {FY_CONFIG[fy].label}
-            </button>
-          ))}
+              className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal bg-white">
+              {Object.keys(FY_CONFIG).map((fy) => <option key={fy} value={fy}>{FY_CONFIG[fy].label}</option>)}
+              <option value={CUSTOM_FY}>Custom</option>
+            </select>
+          </label>
+          {isCustomPeriod && (
+            <>
+              <label className="block text-sm font-semibold text-blue-700">
+                From date
+                <input type="date" value={customFromDate} onChange={(event) => setCustomFromDate(event.target.value)} className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal" />
+              </label>
+              <label className="block text-sm font-semibold text-blue-700">
+                To date
+                <input type="date" value={customToDate} onChange={(event) => setCustomToDate(event.target.value)} className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal" />
+              </label>
+            </>
+          )}
+          <label className="block text-sm font-semibold text-blue-700">
+            As-on date
+            <input
+              type="date"
+              value={asOnDate}
+              min={isCustomPeriod ? customFromDate : toDateInput(fyConfig.fromDate)}
+              max={isCustomPeriod ? customToDate : toDateInput(fyConfig.toDate)}
+              onChange={(event) => setAsOnDate(event.target.value)}
+              className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal"
+            />
+          </label>
         </div>
         <p className="text-sm mt-2 font-semibold text-blue-700">
           Applicable: {fyConfig.section} of {fyConfig.act}
         </p>
-        <label className="block text-sm mt-3 font-semibold text-blue-700 max-w-xs">
-          As-on date
-          <input
-            type="date"
-            value={asOnDate}
-            min={toDateInput(fyConfig.fromDate)}
-            max={toDateInput(fyConfig.toDate)}
-            onChange={(event) => setAsOnDate(event.target.value)}
-            className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal"
-          />
-        </label>
         {importRun && (
           <p className="text-xs mt-1 text-blue-700">
             Import run: {importRun.id} | {importRun.companyName || "Company name unavailable"}
@@ -612,6 +662,16 @@ export default function TallyImport() {
             onRefresh={handleImport}
             loading={loading}
           />
+          <DerivedReviewTabs
+            active={reviewTab}
+            setActive={setReviewTab}
+            daybookRows={daybookRows}
+            daybookTotal={daybookTotal}
+            trialBalance={statements.trialBalance}
+            balanceSheet={statements.balanceSheet}
+            profitLoss={statements.profitLoss}
+            creditors={creditorVendors}
+          />
           <SummaryCards stats={verificationStats} />
           <ReadinessSummary stats={workflowStats} onMarkNotRequired={handleMarkNotRequired} loading={loading} />
           <CreditorLedgerSummary vendors={creditorVendors} />
@@ -662,6 +722,16 @@ export default function TallyImport() {
             onPageChange={changeVoucherPage}
             onRefresh={handleImport}
             loading={loading}
+          />
+          <DerivedReviewTabs
+            active={reviewTab}
+            setActive={setReviewTab}
+            daybookRows={daybookRows}
+            daybookTotal={daybookTotal}
+            trialBalance={statements.trialBalance}
+            balanceSheet={statements.balanceSheet}
+            profitLoss={statements.profitLoss}
+            creditors={creditorVendors}
           />
           <div className="bg-white rounded-2xl p-6 shadow">
             <div className="flex justify-between items-center mb-4 flex-wrap gap-3">
@@ -721,6 +791,159 @@ function getCurrentFinancialYear() {
   const startYear = month >= 3 ? year : year - 1;
   const key = `${startYear}-${String((startYear + 1) % 100).padStart(2, "0")}`;
   return FY_CONFIG[key] ? key : "2025-26";
+}
+
+function dateInputToTally(value) {
+  return String(value || "").replace(/-/g, "");
+}
+
+function DerivedReviewTabs({ active, setActive, daybookRows, daybookTotal, trialBalance, balanceSheet, profitLoss, creditors }) {
+  const tabs = [
+    ["daybook", "Day Book"],
+    ["trial", "Trial Balance"],
+    ["balance", "Balance Sheet"],
+    ["profit", "Profit & Loss"],
+    ["creditors", "Sundry Creditors"],
+    ["fifo", "MSME FIFO"],
+  ];
+  return (
+    <div className="bg-white rounded-2xl p-5 shadow mb-6">
+      <div className="flex gap-2 flex-wrap mb-4">
+        {tabs.map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setActive(key)}
+            className={`px-3 py-2 rounded-lg text-xs font-semibold ${active === key ? "bg-blue-700 text-white" : "bg-gray-100 text-gray-700"}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {active === "daybook" && <DaybookPreview rows={daybookRows} total={daybookTotal} />}
+      {active === "trial" && <StatementLedgerTable title="Trial Balance" rows={trialBalance?.rows || []} summary={trialBalance?.summary} />}
+      {active === "balance" && <StatementGroupTable title="Balance Sheet" groups={balanceSheet?.groups || []} summary={balanceSheet?.summary} />}
+      {active === "profit" && <StatementGroupTable title="Profit & Loss" groups={profitLoss?.groups || []} summary={profitLoss?.summary} />}
+      {active === "creditors" && <CreditorLedgerSummary vendors={creditors} />}
+      {active === "fifo" && <FifoAgingTable vendors={creditors} />}
+    </div>
+  );
+}
+
+function DaybookPreview({ rows, total }) {
+  return (
+    <div>
+      <h3 className="text-lg font-bold text-gray-800">Full Day Book</h3>
+      <p className="text-xs text-gray-500 mb-3">Showing first {rows.length.toLocaleString("en-IN")} of {Number(total || 0).toLocaleString("en-IN")} imported ledger-entry rows.</p>
+      <SimpleVoucherTable rows={rows} />
+    </div>
+  );
+}
+
+function SimpleVoucherTable({ rows }) {
+  return (
+    <div className="max-h-72 overflow-auto border border-gray-100 rounded-xl">
+      <table className="w-full text-xs">
+        <thead className="sticky top-0 bg-gray-50">
+          <tr><th className="text-left p-2">Date</th><th className="text-left p-2">Ledger</th><th className="text-left p-2">Parent</th><th className="text-left p-2">Voucher</th><th className="text-right p-2">Debit</th><th className="text-right p-2">Credit</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id} className="border-t">
+              <td className="p-2">{formatDisplayDate(row.date)}</td>
+              <td className="p-2 font-semibold">{row.ledgerName}</td>
+              <td className="p-2">{row.ledgerParent || "-"}</td>
+              <td className="p-2">{row.voucherType || "-"} {row.voucherNumber || ""}</td>
+              <td className="p-2 text-right">{row.debit ? row.debit.toLocaleString("en-IN") : ""}</td>
+              <td className="p-2 text-right">{row.credit ? row.credit.toLocaleString("en-IN") : ""}</td>
+            </tr>
+          ))}
+          {!rows.length && <tr><td className="p-4 text-center text-gray-500" colSpan="6">No Day Book rows loaded yet.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function StatementLedgerTable({ title, rows, summary }) {
+  return (
+    <div>
+      <div className="flex items-end justify-between gap-3 flex-wrap mb-3">
+        <h3 className="text-lg font-bold text-gray-800">{title}</h3>
+        <p className="text-xs text-gray-500">{summary?.ledgerCount || rows.length} ledgers | Dr {(summary?.totalDebit || 0).toLocaleString("en-IN")} | Cr {(summary?.totalCredit || 0).toLocaleString("en-IN")}</p>
+      </div>
+      <div className="max-h-72 overflow-auto border border-gray-100 rounded-xl">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-50"><tr><th className="text-left p-2">Ledger</th><th className="text-left p-2">Group</th><th className="text-right p-2">Opening</th><th className="text-right p-2">Debit</th><th className="text-right p-2">Credit</th><th className="text-right p-2">Closing</th></tr></thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.normalizedLedgerName} className="border-t">
+                <td className="p-2 font-semibold">{row.ledgerName}</td>
+                <td className="p-2">{row.parent || "-"}</td>
+                <td className="p-2 text-right">{formatMoney(row.openingBalance)}</td>
+                <td className="p-2 text-right">{row.debit.toLocaleString("en-IN")}</td>
+                <td className="p-2 text-right">{row.credit.toLocaleString("en-IN")}</td>
+                <td className="p-2 text-right">{formatMoney(row.derivedClosingBalance)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function StatementGroupTable({ title, groups, summary }) {
+  return (
+    <div>
+      <div className="flex items-end justify-between gap-3 flex-wrap mb-3">
+        <h3 className="text-lg font-bold text-gray-800">{title}</h3>
+        <p className="text-xs text-gray-500">{summary?.groupCount || groups.length} groups | {summary?.ledgerCount || 0} ledgers</p>
+      </div>
+      <div className="max-h-72 overflow-auto border border-gray-100 rounded-xl">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-50"><tr><th className="text-left p-2">Group</th><th className="text-right p-2">Ledgers</th><th className="text-right p-2">Debit</th><th className="text-right p-2">Credit</th><th className="text-right p-2">Closing</th></tr></thead>
+          <tbody>
+            {groups.map((group) => (
+              <tr key={group.groupName} className="border-t">
+                <td className="p-2 font-semibold">{group.groupName}</td>
+                <td className="p-2 text-right">{group.ledgers.length}</td>
+                <td className="p-2 text-right">{group.debit.toLocaleString("en-IN")}</td>
+                <td className="p-2 text-right">{group.credit.toLocaleString("en-IN")}</td>
+                <td className="p-2 text-right">{formatMoney(group.closingBalance)}</td>
+              </tr>
+            ))}
+            {!groups.length && <tr><td className="p-4 text-center text-gray-500" colSpan="5">No statement groups found.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function FifoAgingTable({ vendors }) {
+  const rows = vendors.flatMap((vendor) => (vendor.payableAging?.invoices || []).map((invoice) => ({ vendor, invoice })));
+  return (
+    <div>
+      <h3 className="text-lg font-bold text-gray-800 mb-3">MSME FIFO Aging</h3>
+      <div className="max-h-72 overflow-auto border border-gray-100 rounded-xl">
+        <table className="w-full text-xs">
+          <thead className="sticky top-0 bg-gray-50"><tr><th className="text-left p-2">Vendor</th><th className="text-left p-2">Invoice</th><th className="text-left p-2">Date</th><th className="text-right p-2">Pending</th><th className="text-right p-2">Days</th><th className="text-right p-2">Delay</th></tr></thead>
+          <tbody>
+            {rows.map(({ vendor, invoice }) => (
+              <tr key={`${vendor.normalizedVendorName}-${invoice.voucherNumber}-${invoice.billReference}`} className="border-t">
+                <td className="p-2 font-semibold">{vendor.name || vendor.party}</td>
+                <td className="p-2">{invoice.billReference || invoice.voucherNumber || "-"}</td>
+                <td className="p-2">{formatDisplayDate(invoice.date)}</td>
+                <td className="p-2 text-right">{invoice.pendingAmount.toLocaleString("en-IN")}</td>
+                <td className="p-2 text-right">{invoice.daysOutstanding ?? "N/A"}</td>
+                <td className="p-2 text-right">{invoice.delayDays || 0}</td>
+              </tr>
+            ))}
+            {!rows.length && <tr><td className="p-4 text-center text-gray-500" colSpan="6">No pending FIFO invoices found.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function LedgerVoucherPanel({ rows, total, page, pageSize, uniqueLedgers, filters, setFilters, onPageChange, onRefresh, loading }) {

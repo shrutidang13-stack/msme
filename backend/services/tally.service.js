@@ -854,6 +854,13 @@ function collectBillRefs(entry) {
   })).filter((bill) => bill.billReference || bill.pendingAmount);
 }
 
+function collectLedgerEntries(voucher) {
+  return [
+    ...collectByKey(voucher, "ALLLEDGERENTRIES.LIST"),
+    ...collectByKey(voucher, "LEDGERENTRIES.LIST"),
+  ];
+}
+
 function signedAmountFromEntry(entry) {
   const directAmount = parseAmount(entry?.AMOUNT);
   if (directAmount) return directAmount;
@@ -871,19 +878,13 @@ function signedAmountFromVoucher(voucher) {
 
 function findLedgerEntry(voucher, ledgerName) {
   const target = normalizeVendorName(ledgerName);
-  const entries = [
-    ...collectByKey(voucher, "ALLLEDGERENTRIES.LIST"),
-    ...collectByKey(voucher, "LEDGERENTRIES.LIST"),
-  ];
+  const entries = collectLedgerEntries(voucher);
   return entries.find((entry) => normalizeVendorName(cleanName(entry.LEDGERNAME)) === target) || null;
 }
 
 function findParticulars(voucher, ledgerName) {
   const target = normalizeVendorName(ledgerName);
-  const entries = [
-    ...collectByKey(voucher, "ALLLEDGERENTRIES.LIST"),
-    ...collectByKey(voucher, "LEDGERENTRIES.LIST"),
-  ];
+  const entries = collectLedgerEntries(voucher);
   const counter = entries.find((entry) => {
     const name = cleanName(entry.LEDGERNAME);
     return name && normalizeVendorName(name) !== target;
@@ -927,19 +928,16 @@ function parseLedgerVouchers(xml, ledgerName) {
   return rows;
 }
 
-function parseVoucherCollection(xml, creditorNames) {
+function parseVoucherCollection(xml, creditorNames = null) {
   const parsed = parseXml(xml, "Voucher Collection");
   const vouchers = collectByKey(parsed, "VOUCHER");
-  const creditorSet = new Set(creditorNames.map(normalizeVendorName));
+  const creditorSet = Array.isArray(creditorNames) ? new Set(creditorNames.map(normalizeVendorName)) : null;
   const rows = [];
 
   for (const voucher of vouchers) {
     const date = formatDate(voucher.DATE || firstText(voucher, ["DATE"]));
     if (!date) continue;
-    const entries = [
-      ...collectByKey(voucher, "ALLLEDGERENTRIES.LIST"),
-      ...collectByKey(voucher, "LEDGERENTRIES.LIST"),
-    ];
+    const entries = collectLedgerEntries(voucher);
     const partyLedger = cleanName(voucher.PARTYLEDGERNAME) || cleanName(voucher.PARTYNAME);
     const voucherType = text(voucher["@_VCHTYPE"]) || cleanName(voucher.VOUCHERTYPENAME);
     const voucherNumber = text(voucher.VOUCHERNUMBER);
@@ -948,7 +946,7 @@ function parseVoucherCollection(xml, creditorNames) {
     for (const entry of entries) {
       const ledgerName = cleanName(entry.LEDGERNAME);
       const normalized = normalizeVendorName(ledgerName);
-      if (!ledgerName || !creditorSet.has(normalized)) continue;
+      if (!ledgerName || (creditorSet && !creditorSet.has(normalized))) continue;
       const signedAmount = signedAmountFromEntry(entry);
       const debit = signedAmount > 0 ? Math.abs(signedAmount) : 0;
       const credit = signedAmount < 0 ? Math.abs(signedAmount) : 0;
@@ -963,6 +961,7 @@ function parseVoucherCollection(xml, creditorNames) {
         normalizedLedgerName: normalized,
         date,
         particulars: partyLedger && normalizeVendorName(partyLedger) !== normalized ? partyLedger : findParticulars(voucher, ledgerName),
+        partyLedgerName: partyLedger,
         voucherType,
         voucherNumber,
         debit: Math.round(debit * 100) / 100,
@@ -975,7 +974,7 @@ function parseVoucherCollection(xml, creditorNames) {
     }
 
     const normalizedPartyLedger = normalizeVendorName(partyLedger);
-    if (partyLedger && creditorSet.has(normalizedPartyLedger) && !matchedLedgers.has(normalizedPartyLedger)) {
+    if (creditorSet && partyLedger && creditorSet.has(normalizedPartyLedger) && !matchedLedgers.has(normalizedPartyLedger)) {
       const signedAmount = signedAmountFromVoucher(voucher);
       const debit = signedAmount > 0 ? Math.abs(signedAmount) : 0;
       const credit = signedAmount < 0 ? Math.abs(signedAmount) : 0;
@@ -989,6 +988,7 @@ function parseVoucherCollection(xml, creditorNames) {
           normalizedLedgerName: normalizedPartyLedger,
           date,
           particulars: findParticulars(voucher, partyLedger),
+          partyLedgerName: partyLedger,
           voucherType,
           voucherNumber,
           debit: Math.round(debit * 100) / 100,
@@ -1531,6 +1531,85 @@ async function fetchAllCreditorLedgerVouchers({ creditors, from = "20250401", to
   return { rows: mergedRows, warnings, voucherSource, fallbackUsed, sourcesUsed: [...sourcesUsed] };
 }
 
+async function fetchAllDayBookVouchers({ from = "20250401", to = "20260331", companyName } = {}) {
+  const rows = [];
+  const warnings = [];
+  const sourcesUsed = new Set();
+  let fallbackUsed = false;
+  const monthBatches = buildPeriodBatches(from, to, 3);
+  const company = await requireTallyCompany({ companyName });
+  logImportStage("daybookExport", { status: "start", batchCount: monthBatches.length, from, to, companyName: company.companyName });
+
+  for (const batch of monthBatches) {
+    try {
+      const result = await fetchVoucherBatch({ batch, creditorNames: null, companyName: company.companyName, mode: "monthly_full_daybook" });
+      rows.push(...result.rows);
+      if (result.source) sourcesUsed.add(result.source);
+      if (result.fallbackUsed) fallbackUsed = true;
+      if (result.warning) warnings.push(result.warning);
+    } catch (error) {
+      warnings.push({ ledgerName: "ALL", message: `Day Book batch ${batch.label} failed: ${error.message}` });
+    }
+  }
+
+  const mergedRows = dedupeVoucherRows(rows);
+  const voucherSource = sourcesUsed.size > 1 ? [...sourcesUsed].join(" + ") : [...sourcesUsed][0] || "Day Book";
+  if (monthBatches.length > 0 && mergedRows.length === 0 && warnings.length >= monthBatches.length) {
+    logImportStage("daybookExport", { status: "failed", warnings });
+    throw new Error(`Could not fetch full Day Book rows for selected period: ${warnings[0]?.message || "Tally Day Book export failed"}`);
+  }
+  logImportStage("daybookExport", {
+    status: "success",
+    exportedVoucherCount: rows.length,
+    dedupedVoucherCount: mergedRows.length,
+    voucherSource,
+    fallbackUsed,
+    warnings: warnings.length,
+  });
+  return { rows: mergedRows, warnings, voucherSource, fallbackUsed, sourcesUsed: [...sourcesUsed] };
+}
+
+async function fetchLedgerMetadata({ companyName } = {}) {
+  const company = await requireTallyCompany({ companyName });
+  const { xml: ledgerXml } = await tallyRequestWithCompanyVariants(
+    (selectedCompany) => buildLedgerCollectionXML(selectedCompany),
+    company.companyName,
+    { timeoutMs: 30000 }
+  );
+  const ledgerLineError = lineError(ledgerXml);
+  if (ledgerLineError) throw new Error(ledgerLineError);
+  let sourceXml = ledgerXml;
+  try {
+    const { xml: masterXml } = await tallyRequestWithCompanyVariants(
+      (selectedCompany) => buildLedgerMasterCollectionXML(selectedCompany),
+      company.companyName,
+      { timeoutMs: 30000 }
+    );
+    const validated = validateStandardExportXml(masterXml, "Ledger Master Collection metadata", ["LEDGER"]);
+    if (!validated.rowCount) throw new Error("Ledger Master Collection returned no ledger rows.");
+    sourceXml = masterXml;
+  } catch (error) {
+    logImportStage("ledgerMetadata", { status: "master_skipped", error: error.message });
+  }
+  const groupMap = parseGroupCollection(ledgerXml);
+  const ledgers = parseLedgerRecords(sourceXml).map((ledger) => {
+    const ancestry = groupAncestors(ledger.parent, groupMap);
+    const groupHierarchy = [ledger.parent, ...ancestry].filter(Boolean);
+    return {
+      ...ledger,
+      groupHierarchy,
+      detectionReasons: classifyCreditorLedger(ledger, groupMap).reasons,
+      isSundryCreditor: groupHierarchy.some(isSundryCreditorGroupName),
+    };
+  });
+  return {
+    companyName: company.companyName,
+    companyNames: company.companyNames,
+    companyDetectionMethod: company.method,
+    ledgers,
+  };
+}
+
 async function checkStatus() {
   const company = await requireTallyCompany();
   const { xml } = await tallyRequestWithCompanyVariants(
@@ -1744,6 +1823,8 @@ module.exports = {
   parseVoucherCollection,
   fetchLedgerVouchers,
   fetchAllCreditorLedgerVouchers,
+  fetchAllDayBookVouchers,
+  fetchLedgerMetadata,
   buildPeriodBatches,
   buildMonthlyBatches,
   buildVoucherCollectionXML,
