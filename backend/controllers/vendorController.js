@@ -1,6 +1,7 @@
 const vendorRepository = require("../repositories/vendorRepository");
 const tallyImportService = require("../services/tallyImport.service");
 const { verifyUdyamNumber } = require("../services/udyamVerifier.service");
+const udyamFallbackService = require("../services/udyamFallback.service");
 const { actorFromUser } = require("../middleware/auth");
 
 function actorFromRequest(req) {
@@ -190,11 +191,37 @@ async function verificationQueue(req, res, next) {
 
 async function verifyUdyam(req, res, next) {
   try {
-    const { vendorName, udyamNumber } = req.body || {};
+    const { vendorName, udyamNumber, panNumber } = req.body || {};
     if (!vendorName) return res.status(400).json({ success: false, error: "vendorName is required" });
     if (!udyamNumber) return res.status(400).json({ success: false, error: "udyamNumber is required" });
 
-    const verification = await verifyUdyamNumber(udyamNumber);
+    let verification = await verifyUdyamNumber(udyamNumber);
+    let verificationSource = verification.verified ? "live_portal" : "manual_review";
+    let fallbackMatch = null;
+    if (!verification.verified) {
+      fallbackMatch = udyamFallbackService.findFallback({ vendorName, udyamNumber, panNumber });
+      if (fallbackMatch) {
+        verification = {
+          ...verification,
+          verified: true,
+          verificationStatus: "verified",
+          udyamNumber: fallbackMatch.udyamNumber || String(udyamNumber).trim().toUpperCase(),
+          enterpriseName: fallbackMatch.enterpriseName || fallbackMatch.vendorName || vendorName,
+          enterpriseType: fallbackMatch.enterpriseType || "Micro",
+          registrationValidity: fallbackMatch.registrationValidity,
+          registrationDate: fallbackMatch.registrationDate,
+          verifiedAt: new Date().toISOString(),
+          fallbackMatched: true,
+          fallbackMatchedBy: fallbackMatch.matchedBy,
+          fallbackSourceWorkbook: fallbackMatch.sourceWorkbook,
+          fallbackSourceSheet: fallbackMatch.sourceSheet,
+          fallbackEvidencePath: fallbackMatch.evidencePath,
+          fallbackRootDir: fallbackMatch.fallbackRootDir,
+          error: "",
+        };
+        verificationSource = "fallback_upload";
+      }
+    }
     const vendor = await vendorRepository.upsertVendorStatus(
       {
         vendorName,
@@ -202,18 +229,26 @@ async function verifyUdyam(req, res, next) {
         udyamNumber: verification.udyamNumber,
         enterpriseName: verification.enterpriseName,
         enterpriseType: verification.enterpriseType,
+        panNumber: fallbackMatch?.panNumber || panNumber || "",
         verificationStatus: verification.verified ? "verified" : verification.verificationStatus,
-        udyamStatus: verification.verified ? "verified" : "manual_fallback_required",
-        actionStatus: verification.verified ? "verified_msme" : "manual_review",
+        udyamStatus: verification.verified ? "verified" : verification.verificationStatus || "manual_fallback_required",
+        actionStatus: verification.verified ? "verified_msme" : (verification.verificationStatus === "invalid_format" ? "failed" : "manual_review"),
         reviewStatus: verification.verified ? "approved" : "manual_review",
-        udyamRemarks: verification.verified ? "" : verification.error || "Udyam portal automation did not produce a certain verified result.",
+        udyamRemarks: verification.verified
+          ? (verificationSource === "fallback_upload" ? "Fallback data used" : "Live portal verified")
+          : verification.error || "Udyam portal automation did not produce a certain verified result.",
         registrationValidity: verification.registrationValidity,
         registrationDate: verification.registrationDate,
         verifiedAt: verification.verifiedAt,
         lastVerifiedAt: new Date().toISOString(),
+        verificationSource,
+        evidenceLink: verification.fallbackEvidencePath || verification.screenshotPath || "",
+        evidenceUrl: verification.fallbackEvidencePath || verification.screenshotPath || "",
+        udyamProofFileUrl: verification.fallbackEvidencePath || verification.screenshotPath || "",
+        evidenceDocumentType: verification.fallbackEvidencePath ? "fallback_msme_evidence" : "",
       },
       actorFromRequest(req),
-      "udyam_verification"
+      verificationSource
     );
     vendorRepository.recordVerificationAttempt({
       vendorId: vendor.id,

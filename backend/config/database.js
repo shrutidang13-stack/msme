@@ -170,6 +170,89 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_mca_msme1_filings_report
       ON mca_msme1_filings(report_id);
 
+    CREATE TABLE IF NOT EXISTS msme_baseline_snapshots (
+      id TEXT PRIMARY KEY,
+      import_run_id TEXT NOT NULL,
+      baseline_date TEXT NOT NULL,
+      vendor_name TEXT NOT NULL,
+      normalized_vendor_name TEXT NOT NULL,
+      opening_balance REAL NOT NULL DEFAULT 0,
+      closing_balance REAL NOT NULL DEFAULT 0,
+      ledger_payable_outstanding REAL NOT NULL DEFAULT 0,
+      pan_number TEXT,
+      raw_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(import_run_id) REFERENCES tally_import_runs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS msme_interest_movements (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      financial_year TEXT NOT NULL,
+      vendor_name TEXT NOT NULL,
+      invoice_number TEXT,
+      opening_interest REAL NOT NULL DEFAULT 0,
+      interest_accrued REAL NOT NULL DEFAULT 0,
+      interest_paid REAL NOT NULL DEFAULT 0,
+      interest_waived REAL NOT NULL DEFAULT 0,
+      closing_interest_payable REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'computed',
+      raw_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY(report_id) REFERENCES compliance_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS msme_carry_forward_register (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      prior_report_id TEXT NOT NULL DEFAULT '',
+      financial_year TEXT NOT NULL,
+      vendor_name TEXT NOT NULL,
+      normalized_vendor_name TEXT NOT NULL DEFAULT '',
+      pan_number TEXT NOT NULL DEFAULT '',
+      udyam_number TEXT NOT NULL DEFAULT '',
+      invoice_number TEXT NOT NULL DEFAULT '',
+      invoice_date TEXT NOT NULL DEFAULT '',
+      opening_disallowance REAL NOT NULL DEFAULT 0,
+      paid_during_year REAL NOT NULL DEFAULT 0,
+      deductible_current_year REAL NOT NULL DEFAULT 0,
+      closing_carry_forward REAL NOT NULL DEFAULT 0,
+      settlement_source TEXT NOT NULL DEFAULT '',
+      evidence_reference TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'computed',
+      raw_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES compliance_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS mca_msme1_supplier_rows (
+      id TEXT PRIMARY KEY,
+      filing_id TEXT NOT NULL,
+      serial_number INTEGER,
+      supplier_name TEXT NOT NULL,
+      pan_number TEXT,
+      udyam_number TEXT,
+      amount_paid_within_45 REAL NOT NULL DEFAULT 0,
+      amount_paid_after_45 REAL NOT NULL DEFAULT 0,
+      outstanding_45_or_less REAL NOT NULL DEFAULT 0,
+      outstanding_more_than_45 REAL NOT NULL DEFAULT 0,
+      reason_for_delay TEXT,
+      validation_status TEXT NOT NULL DEFAULT 'pending',
+      validation_errors_json TEXT NOT NULL DEFAULT '[]',
+      raw_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY(filing_id) REFERENCES mca_msme1_filings(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS mca_msme1_xml_generations (
+      id TEXT PRIMARY KEY,
+      filing_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      xml_file_path TEXT NOT NULL DEFAULT '',
+      validation_json TEXT NOT NULL DEFAULT '{}',
+      generated_by TEXT,
+      generated_at TEXT NOT NULL,
+      FOREIGN KEY(filing_id) REFERENCES mca_msme1_filings(id)
+    );
+
     CREATE TABLE IF NOT EXISTS purchase_invoices (
       id TEXT PRIMARY KEY,
       vendor_id TEXT,
@@ -198,6 +281,107 @@ function migrate() {
 
     CREATE INDEX IF NOT EXISTS idx_purchase_invoices_source
       ON purchase_invoices(source, created_at);
+
+    CREATE TABLE IF NOT EXISTS tax_audit_reports (
+      id TEXT PRIMARY KEY,
+      source_msme_report_id TEXT NOT NULL,
+      import_run_id TEXT NOT NULL,
+      company_name TEXT NOT NULL DEFAULT '',
+      financial_year TEXT NOT NULL,
+      assessment_year TEXT NOT NULL,
+      form_type TEXT NOT NULL CHECK (form_type IN ('3CA', '3CB')),
+      status TEXT NOT NULL DEFAULT 'draft',
+      validation_status TEXT NOT NULL DEFAULT 'not_run',
+      generated_json_snapshot TEXT NOT NULL DEFAULT '{}',
+      generated_pdf_path TEXT NOT NULL DEFAULT '',
+      created_by TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(source_msme_report_id) REFERENCES compliance_reports(id),
+      FOREIGN KEY(import_run_id) REFERENCES tally_import_runs(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS tax_audit_report_versions (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      version_no INTEGER NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      created_by TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS tax_audit_clauses (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      clause_no TEXT NOT NULL,
+      clause_title TEXT NOT NULL DEFAULT '',
+      schema_key TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL DEFAULT 'manual',
+      status TEXT NOT NULL DEFAULT 'na',
+      amount REAL NOT NULL DEFAULT 0,
+      remarks TEXT NOT NULL DEFAULT '',
+      annexure_ref TEXT NOT NULL DEFAULT '',
+      evidence_ref TEXT NOT NULL DEFAULT '',
+      review_status TEXT NOT NULL DEFAULT 'requires_review',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      updated_by TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS tax_audit_annexures (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      annexure_type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      source_schedule TEXT NOT NULL DEFAULT '',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS tax_audit_validation_errors (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      code TEXT NOT NULL,
+      message TEXT NOT NULL,
+      schema_path TEXT NOT NULL DEFAULT '',
+      clause_no TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS assessee_details (
+      report_id TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      updated_by TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS auditor_details (
+      report_id TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      updated_by TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS tax_audit_edit_log (
+      id TEXT PRIMARY KEY,
+      report_id TEXT NOT NULL,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL DEFAULT '',
+      field_name TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      changed_by TEXT,
+      changed_at TEXT NOT NULL,
+      comment TEXT NOT NULL DEFAULT '',
+      FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
+    );
   `);
 
   const tableColumns = (tableName) => db.prepare(`PRAGMA table_info(${tableName})`).all().map((column) => column.name);
@@ -227,10 +411,24 @@ function migrate() {
     ["last_import_run_id", "last_import_run_id TEXT"],
     ["pan_number", "pan_number TEXT"],
     ["agreed_payment_days", "agreed_payment_days INTEGER"],
+    ["verification_source", "verification_source TEXT NOT NULL DEFAULT 'manual'"],
+    ["evidence_link", "evidence_link TEXT"],
+    ["evidence_document_type", "evidence_document_type TEXT"],
+    ["approved_by", "approved_by TEXT"],
+    ["approved_at", "approved_at TEXT"],
+    ["written_agreement_default", "written_agreement_default INTEGER NOT NULL DEFAULT 0"],
+    ["agreement_credit_days", "agreement_credit_days INTEGER"],
+    ["agreement_evidence_link", "agreement_evidence_link TEXT"],
   ]);
 
   addMissingColumns("tally_ledger_vouchers", [
     ["fiscal_year", "fiscal_year TEXT NOT NULL DEFAULT ''"],
+    ["financial_year", "financial_year TEXT NOT NULL DEFAULT ''"],
+    ["fy_start_date", "fy_start_date TEXT NOT NULL DEFAULT ''"],
+    ["fy_end_date", "fy_end_date TEXT NOT NULL DEFAULT ''"],
+    ["report_from_date", "report_from_date TEXT NOT NULL DEFAULT ''"],
+    ["report_to_date", "report_to_date TEXT NOT NULL DEFAULT ''"],
+    ["as_on_date", "as_on_date TEXT NOT NULL DEFAULT ''"],
     ["company_name", "company_name TEXT NOT NULL DEFAULT ''"],
     ["vendor_name", "vendor_name TEXT NOT NULL DEFAULT ''"],
     ["normalized_vendor_name", "normalized_vendor_name TEXT NOT NULL DEFAULT ''"],
@@ -240,6 +438,17 @@ function migrate() {
     ["ledger_parent", "ledger_parent TEXT NOT NULL DEFAULT ''"],
     ["group_hierarchy_json", "group_hierarchy_json TEXT NOT NULL DEFAULT '[]'"],
     ["voucher_source", "voucher_source TEXT NOT NULL DEFAULT 'Day Book'"],
+    ["invoice_date", "invoice_date TEXT"],
+    ["acceptance_date", "acceptance_date TEXT"],
+    ["deemed_acceptance_date", "deemed_acceptance_date TEXT"],
+    ["has_written_agreement", "has_written_agreement INTEGER"],
+    ["agreement_credit_days", "agreement_credit_days INTEGER"],
+    ["agreement_evidence_link", "agreement_evidence_link TEXT"],
+    ["appointed_day", "appointed_day TEXT"],
+    ["payment_date", "payment_date TEXT"],
+    ["evidence_status", "evidence_status TEXT NOT NULL DEFAULT 'pending_review'"],
+    ["verification_required", "verification_required INTEGER NOT NULL DEFAULT 0"],
+    ["verification_flags_json", "verification_flags_json TEXT NOT NULL DEFAULT '[]'"],
   ]);
 
   addMissingColumns("tally_import_runs", [
@@ -265,6 +474,24 @@ function migrate() {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_tally_ledger_vouchers_vendor
       ON tally_ledger_vouchers(import_run_id, normalized_vendor_name);
+    CREATE INDEX IF NOT EXISTS idx_tally_ledger_vouchers_fy
+      ON tally_ledger_vouchers(import_run_id, financial_year, voucher_date);
+    CREATE INDEX IF NOT EXISTS idx_msme_baseline_snapshots_run
+      ON msme_baseline_snapshots(import_run_id, baseline_date, normalized_vendor_name);
+    CREATE INDEX IF NOT EXISTS idx_msme_carry_forward_report
+      ON msme_carry_forward_register(report_id, normalized_vendor_name);
+    CREATE INDEX IF NOT EXISTS idx_mca_msme1_supplier_rows_filing
+      ON mca_msme1_supplier_rows(filing_id);
+    CREATE INDEX IF NOT EXISTS idx_mca_msme1_xml_generations_filing
+      ON mca_msme1_xml_generations(filing_id);
+    CREATE INDEX IF NOT EXISTS idx_tax_audit_reports_msme
+      ON tax_audit_reports(source_msme_report_id);
+    CREATE INDEX IF NOT EXISTS idx_tax_audit_reports_import
+      ON tax_audit_reports(import_run_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tax_audit_clauses_report_clause
+      ON tax_audit_clauses(report_id, clause_no);
+    CREATE INDEX IF NOT EXISTS idx_tax_audit_validation_report
+      ON tax_audit_validation_errors(report_id, severity);
   `);
 }
 

@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const db = require("../config/database");
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
 const { isSundryCreditorRow } = require("../utils/sundryCreditor");
+const { fiscalYearForDate, fiscalYearDates } = require("../utils/financialYear");
 
 function nowIso() {
   return new Date().toISOString();
@@ -36,6 +37,12 @@ function mapRun(row) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function compactRunForList(run) {
+  if (!run) return run;
+  const { ledgerMetadata, ...summary } = run.summary || {};
+  return { ...run, summary };
 }
 
 function mapCreditor(row, vendorMaster = null) {
@@ -79,10 +86,17 @@ function mapCreditor(row, vendorMaster = null) {
 }
 
 function mapLedgerVoucher(row) {
+  const raw = parseJson(row.raw_json, {});
   return {
     id: row.id,
     importRunId: row.import_run_id,
     fiscalYear: row.fiscal_year || "",
+    financialYear: row.financial_year || row.fiscal_year || fiscalYearForDate(row.voucher_date),
+    fyStartDate: row.fy_start_date || fiscalYearDates(row.financial_year || row.fiscal_year || fiscalYearForDate(row.voucher_date))?.fyStartDate || "",
+    fyEndDate: row.fy_end_date || fiscalYearDates(row.financial_year || row.fiscal_year || fiscalYearForDate(row.voucher_date))?.fyEndDate || "",
+    reportFromDate: row.report_from_date || "",
+    reportToDate: row.report_to_date || "",
+    asOnDate: row.as_on_date || "",
     companyName: row.company_name || "",
     vendorName: row.vendor_name || row.ledger_name,
     normalizedVendorName: row.normalized_vendor_name || row.normalized_ledger_name,
@@ -101,7 +115,20 @@ function mapLedgerVoucher(row) {
     ledgerParent: row.ledger_parent || "",
     groupHierarchy: parseJson(row.group_hierarchy_json, []),
     voucherSource: row.voucher_source || "Day Book",
-    raw: parseJson(row.raw_json, {}),
+    invoiceDate: row.invoice_date || raw.invoiceDate || row.voucher_date || "",
+    acceptanceDate: row.acceptance_date || raw.acceptanceDate || "",
+    deemedAcceptanceDate: row.deemed_acceptance_date || raw.deemedAcceptanceDate || "",
+    agreedPaymentDays: Number(row.agreement_credit_days ?? raw.agreedPaymentDays ?? 0),
+    hasWrittenAgreement: row.has_written_agreement == null
+      ? Boolean(raw.hasWrittenAgreement || Number(raw.agreedPaymentDays || 0) > 0 || raw.agreementEvidence)
+      : Boolean(row.has_written_agreement),
+    agreementEvidence: row.agreement_evidence_link || raw.agreementEvidence || "",
+    appointedDay: row.appointed_day || raw.appointedDay || "",
+    paymentDate: row.payment_date || raw.paymentDate || "",
+    evidenceStatus: row.evidence_status || "pending_review",
+    verificationRequired: Boolean(row.verification_required || raw.verificationRequired),
+    verificationFlags: parseJson(row.verification_flags_json, raw.verificationFlags || []),
+    raw,
     createdAt: row.created_at,
   };
 }
@@ -123,6 +150,9 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
   const runContext = db.prepare("SELECT fiscal_year, company_name FROM tally_import_runs WHERE id = ?").get(id) || {};
   const fiscalYear = summary?.fiscalYear || runContext.fiscal_year || "";
   const companyName = summary?.companyName || runContext.company_name || "";
+  const defaultPeriod = Array.isArray(summary?.financialYearPeriods) && summary.financialYearPeriods.length === 1
+    ? summary.financialYearPeriods[0]
+    : null;
   logImportStage("voucherPersist", {
     status: "start",
     importRunId: id,
@@ -175,11 +205,14 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
     }
     const insertVoucher = db.prepare(`
       INSERT INTO tally_ledger_vouchers (
-        id, import_run_id, fiscal_year, company_name, vendor_name, normalized_vendor_name,
+        id, import_run_id, fiscal_year, financial_year, fy_start_date, fy_end_date, report_from_date, report_to_date, as_on_date,
+        company_name, vendor_name, normalized_vendor_name,
         ledger_name, normalized_ledger_name, voucher_date, particulars, voucher_type,
         voucher_number, debit, credit, amount, bill_reference, pending_amount, party_ledger_name,
-        ledger_parent, group_hierarchy_json, voucher_source, raw_json, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ledger_parent, group_hierarchy_json, voucher_source, invoice_date, acceptance_date, deemed_acceptance_date,
+        has_written_agreement, agreement_credit_days, agreement_evidence_link, appointed_day, payment_date,
+        evidence_status, verification_required, verification_flags_json, raw_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const timestamp = nowIso();
     const seenVouchers = new Set();
@@ -187,6 +220,8 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
     for (const voucher of ledgerVouchers) {
       const vendorName = voucher.vendorName || voucher.ledgerName;
       const normalizedVendorName = voucher.normalizedVendorName || voucher.normalizedLedgerName || normalizeVendorName(vendorName);
+      const derivedFinancialYear = voucher.financialYear || defaultPeriod?.financialYear || fiscalYearForDate(voucher.date) || fiscalYear;
+      const fyDates = fiscalYearDates(derivedFinancialYear) || {};
       const voucherKey = [
         normalizedVendorName,
         voucher.date || "",
@@ -200,10 +235,23 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
         continue;
       }
       seenVouchers.add(voucherKey);
+      const raw = voucher.raw || voucher;
+      const invoiceDate = voucher.invoiceDate || raw.invoiceDate || voucher.date || "";
+      const acceptanceDate = voucher.acceptanceDate || raw.acceptanceDate || "";
+      const deemedAcceptanceDate = voucher.deemedAcceptanceDate || raw.deemedAcceptanceDate || "";
+      const agreementDays = Number(voucher.agreedPaymentDays ?? raw.agreedPaymentDays ?? 0);
+      const hasWrittenAgreement = voucher.hasWrittenAgreement ?? raw.hasWrittenAgreement ?? (agreementDays > 0 ? true : null);
+      const verificationFlags = voucher.verificationFlags || raw.verificationFlags || [];
       insertVoucher.run(
         crypto.randomUUID(),
         id,
         fiscalYear,
+        derivedFinancialYear,
+        voucher.fyStartDate || defaultPeriod?.fyStartDate || fyDates.fyStartDate || "",
+        voucher.fyEndDate || defaultPeriod?.fyEndDate || fyDates.fyEndDate || "",
+        voucher.reportFromDate || defaultPeriod?.reportFromDate || "",
+        voucher.reportToDate || defaultPeriod?.reportToDate || "",
+        voucher.asOnDate || defaultPeriod?.asOnDate || summary?.asOn || "",
         companyName,
         vendorName,
         normalizedVendorName,
@@ -222,7 +270,18 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
         voucher.ledgerParent || "",
         JSON.stringify(voucher.groupHierarchy || []),
         voucher.voucherSource || "Day Book",
-        JSON.stringify(voucher.raw || voucher),
+        invoiceDate,
+        acceptanceDate,
+        deemedAcceptanceDate,
+        hasWrittenAgreement == null ? null : (hasWrittenAgreement ? 1 : 0),
+        agreementDays || null,
+        voucher.agreementEvidence || raw.agreementEvidence || "",
+        voucher.appointedDay || raw.appointedDay || "",
+        voucher.paymentDate || raw.paymentDate || "",
+        voucher.evidenceStatus || raw.evidenceStatus || "pending_review",
+        voucher.verificationRequired || raw.verificationRequired ? 1 : 0,
+        JSON.stringify(verificationFlags),
+        JSON.stringify(raw),
         timestamp
       );
     }
@@ -272,7 +331,11 @@ function getRun(id) {
 }
 
 function listRuns() {
-  return db.prepare("SELECT * FROM tally_import_runs ORDER BY created_at DESC LIMIT 50").all().map(mapRun);
+  return db.prepare("SELECT * FROM tally_import_runs ORDER BY created_at DESC LIMIT 50").all().map(mapRun).map(compactRunForList);
+}
+
+function getLatestCompletedRun() {
+  return mapRun(db.prepare("SELECT * FROM tally_import_runs WHERE status = 'completed' ORDER BY created_at DESC LIMIT 1").get());
 }
 
 function getRawCreditorRows(importRunId) {
@@ -319,6 +382,11 @@ function getLedgerVouchers(importRunId, filters = {}) {
   if (voucherType) {
     where.push("LOWER(voucher_type) = LOWER(?)");
     params.push(voucherType);
+  }
+  const requestedFinancialYear = String(filters.financialYear || filters.fiscalYear || "").trim();
+  if (requestedFinancialYear && requestedFinancialYear.toLowerCase() !== "all" && requestedFinancialYear !== "custom") {
+    where.push("(financial_year = ? OR (financial_year = '' AND fiscal_year = ?))");
+    params.push(requestedFinancialYear, requestedFinancialYear);
   }
   if (filters.fromDate) {
     where.push("voucher_date >= ?");
@@ -383,6 +451,18 @@ function getAllLedgerVouchers(importRunId) {
   return rows.filter((row) => sundryNames.has(row.normalizedLedgerName || row.normalizedVendorName));
 }
 
+function getLedgerVouchersForReport(importRunId, filters = {}) {
+  const requestedFinancialYear = String(filters.financialYear || filters.fiscalYear || "").trim();
+  return getAllLedgerVouchers(importRunId).filter((row) => {
+    if (requestedFinancialYear && requestedFinancialYear.toLowerCase() !== "all" && requestedFinancialYear !== "custom") {
+      if (row.financialYear !== requestedFinancialYear && row.fiscalYear !== requestedFinancialYear) return false;
+    }
+    if (filters.fromDate && row.date < filters.fromDate) return false;
+    if (filters.toDate && row.date > filters.toDate) return false;
+    return true;
+  });
+}
+
 function getDaybookVouchers(importRunId, filters = {}) {
   const where = ["import_run_id = ?"];
   const params = [importRunId];
@@ -393,6 +473,11 @@ function getDaybookVouchers(importRunId, filters = {}) {
   if (filters.voucherType) {
     where.push("LOWER(voucher_type) = LOWER(?)");
     params.push(filters.voucherType);
+  }
+  const requestedFinancialYear = String(filters.financialYear || filters.fiscalYear || "").trim();
+  if (requestedFinancialYear && requestedFinancialYear.toLowerCase() !== "all" && requestedFinancialYear !== "custom") {
+    where.push("(financial_year = ? OR (financial_year = '' AND fiscal_year = ?))");
+    params.push(requestedFinancialYear, requestedFinancialYear);
   }
   if (filters.search) {
     where.push("(LOWER(ledger_name) LIKE LOWER(?) OR LOWER(particulars) LIKE LOWER(?) OR LOWER(voucher_number) LIKE LOWER(?) OR LOWER(bill_reference) LIKE LOWER(?))");
@@ -430,19 +515,79 @@ function getLedgerVoucherDiagnostics(importRunId) {
   };
 }
 
+function saveBaselineSnapshot(importRunId, rows = []) {
+  const timestamp = nowIso();
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM msme_baseline_snapshots WHERE import_run_id = ?").run(importRunId);
+    const insert = db.prepare(`
+      INSERT INTO msme_baseline_snapshots (
+        id, import_run_id, baseline_date, vendor_name, normalized_vendor_name, opening_balance,
+        closing_balance, ledger_payable_outstanding, pan_number, raw_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const row of rows) {
+      insert.run(
+        crypto.randomUUID(),
+        importRunId,
+        row.baselineDate || row.baseline_date || "2025-03-31",
+        row.vendorName || row.ledgerName || row.party || "",
+        row.normalizedVendorName || row.normalizedLedgerName || normalizeVendorName(row.vendorName || row.ledgerName || row.party),
+        Number(row.openingBalance || 0),
+        Number(row.closingBalance || 0),
+        Number(row.ledgerPayableOutstanding ?? row.outstandingAmount ?? Math.max(-Number(row.closingBalance || 0), 0)),
+        row.panNumber || "",
+        JSON.stringify(row.raw || row),
+        timestamp
+      );
+    }
+  });
+  tx();
+  return getBaselineSnapshot(importRunId);
+}
+
+function getBaselineSnapshot(importRunId, baselineDate = "") {
+  const params = [importRunId];
+  let where = "import_run_id = ?";
+  if (baselineDate) {
+    where += " AND baseline_date = ?";
+    params.push(baselineDate);
+  }
+  return db.prepare(`
+    SELECT * FROM msme_baseline_snapshots
+    WHERE ${where}
+    ORDER BY vendor_name ASC
+  `).all(...params).map((row) => ({
+    id: row.id,
+    importRunId: row.import_run_id,
+    baselineDate: row.baseline_date,
+    vendorName: row.vendor_name,
+    normalizedVendorName: row.normalized_vendor_name,
+    openingBalance: Number(row.opening_balance || 0),
+    closingBalance: Number(row.closing_balance || 0),
+    ledgerPayableOutstanding: Number(row.ledger_payable_outstanding || 0),
+    panNumber: row.pan_number || "",
+    raw: parseJson(row.raw_json, {}),
+    createdAt: row.created_at,
+  }));
+}
+
 module.exports = {
   createRun,
   completeRun,
   failRun,
   getRun,
+  getLatestCompletedRun,
   listRuns,
   getCreditors,
   getIgnoredNonSundryCreditors,
   getLedgerVouchers,
   getAllLedgerVouchers,
+  getLedgerVouchersForReport,
   getDaybookVouchers,
   getAllDaybookVouchers,
   getLedgerVoucherDiagnostics,
+  saveBaselineSnapshot,
+  getBaselineSnapshot,
   mapCreditor,
   mapLedgerVoucher,
 };

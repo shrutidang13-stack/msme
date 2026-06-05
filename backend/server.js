@@ -11,6 +11,7 @@ const purchaseInvoiceRoutes = require("./routes/purchaseInvoiceRoutes");
 const legalRoutes = require("./routes/legalRoutes");
 const msmeRoutes = require("./routes/msmeRoutes");
 const mcaMsme1Routes = require("./routes/mcaMsme1Routes");
+const taxAuditRoutes = require("./routes/taxAuditRoutes");
 const { requireAuth } = require("./middleware/auth");
 
 const app = express();
@@ -32,6 +33,7 @@ app.use("/api", auditRoutes);
 app.use("/api", legalRoutes);
 app.use("/api", msmeRoutes);
 app.use("/api", mcaMsme1Routes);
+app.use("/api", taxAuditRoutes);
 app.use("/api/ai", aiRoutes);
 
 app.get("/", (req, res) => {
@@ -51,6 +53,7 @@ app.get("/", (req, res) => {
       "POST /api/msme/interest-calculator",
       "POST /api/mca/msme1/generate",
       "POST /api/reports/msme",
+      "POST /api/tax-audit/reports",
       "POST /api/run-full-audit",
     ].join("\n")
   );

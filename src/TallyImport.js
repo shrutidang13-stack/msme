@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import VendorVerificationTable from "./components/VendorVerificationTable";
 import {
@@ -8,7 +8,10 @@ import {
   fetchBalanceSheet,
   fetchDaybook,
   fetchLedgerVouchers,
+  fetchLatestCompletedImport,
+  fetchTallyImportStatus,
   fetchProfitLoss,
+  fetchImportRun,
   fetchTallyHealth,
   fetchTrialBalance,
   importFromTally,
@@ -37,11 +40,26 @@ const CUSTOM_FY = "custom";
 
 const VOUCHER_PROGRESS_LABELS = ["Apr-Jun", "Jul-Sep", "Oct-Dec", "Jan-Mar"];
 const VOUCHER_PAGE_SIZE = 250;
-const UDYAM_IMPORT_HEADERS = ["Vendor Name", "Udyam Number", "Payment Terms"];
+const UDYAM_IMPORT_HEADERS = ["Vendor Name", "Udyam Number", "Payment Terms", "PAN no", "Enterprise Type"];
 
 function activeVoucherFilter(value, allLabel) {
   const normalized = String(value || "").trim().toLowerCase();
   return !normalized || normalized === allLabel.toLowerCase() || normalized === "all" ? "" : value;
+}
+
+function normalizeVendorKey(name) {
+  return String(name || "")
+    .trim()
+    .toUpperCase()
+    .replace(/&/g, " AND ")
+    .replace(/[^A-Z0-9\s]/g, " ")
+    .replace(/\bPRIVATE\s+LIMITED\b/g, " ")
+    .replace(/\bPVT\.?\s*LTD\.?\b/g, " ")
+    .replace(/\bLIMITED\b/g, " ")
+    .replace(/\bLTD\.?\b/g, " ")
+    .replace(/\bLLP\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function parseCsvLine(line) {
@@ -86,6 +104,9 @@ function canonicalUdyamHeader(header) {
     paymentterm: "paymentTerms",
     agreedpaymentdays: "paymentTerms",
     allowedpaymentdays: "paymentTerms",
+    pan: "panNumber",
+    panno: "panNumber",
+    pannumber: "panNumber",
     enterprisetype: "enterpriseType",
     enterprisename: "enterpriseName",
     evidenceurl: "evidenceUrl",
@@ -144,7 +165,7 @@ function validateUdyamImportRows(rows) {
 function downloadUdyamTemplate() {
   const sheet = XLSX.utils.aoa_to_sheet([
     UDYAM_IMPORT_HEADERS,
-    ["Acme Supplier", "UDYAM-DL-01-1234567", "45 days"],
+    ["Acme Supplier", "UDYAM-DL-01-1234567", "45 days", "ABCDE1234F", "Micro"],
   ]);
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, sheet, "Udyam Import");
@@ -152,8 +173,10 @@ function downloadUdyamTemplate() {
 }
 
 export default function TallyImport() {
+  const activeImportRequestRef = useRef(0);
   const [vendors, setVendors] = useState([]);
   const [selectedFY, setSelectedFY] = useState(getCurrentFinancialYear());
+  const [reportFinancialYear, setReportFinancialYear] = useState("all");
   const [periodType, setPeriodType] = useState("financial_year");
   const [customFromDate, setCustomFromDate] = useState(toDateInput(FY_CONFIG[getCurrentFinancialYear()]?.fromDate));
   const [customToDate, setCustomToDate] = useState(toDateInput(FY_CONFIG[getCurrentFinancialYear()]?.toDate));
@@ -180,6 +203,7 @@ export default function TallyImport() {
   const [udyamFileName, setUdyamFileName] = useState("");
   const [udyamActivity, setUdyamActivity] = useState([]);
   const [udyamImporting, setUdyamImporting] = useState(false);
+  const [downloadingReport, setDownloadingReport] = useState("");
   const [notice, setNotice] = useState("");
 
   const {
@@ -205,6 +229,11 @@ export default function TallyImport() {
     () => Array.from(new Set(creditorVendors.map((row) => row.name).filter(Boolean))).sort(),
     [creditorVendors]
   );
+  const availableReportYears = useMemo(() => {
+    const years = importRun?.summary?.financialYears || (importRun?.fiscalYear && importRun.fiscalYear !== "custom" ? [importRun.fiscalYear] : []);
+    return Array.from(new Set(years.filter(Boolean))).sort();
+  }, [importRun]);
+  const tallyCompanyPlaceholder = tallyHealth?.companyName || importRun?.companyName || "NXTMOBILITY ENERGY PRIVATE LIMITED - (from 1-Apr-2023)";
 
   const pendingVendors = useMemo(
     () =>
@@ -237,13 +266,15 @@ export default function TallyImport() {
     setVendors((prev) => prev.map((vendor) => (vendor.name === vendorName ? { ...vendor, vendorMaster } : vendor)));
   };
 
-  const loadDerivedViews = async (runId) => {
+  const loadDerivedViews = async (runId, financialYear = reportFinancialYear, options = {}) => {
+    const scopedParams = financialYear && financialYear !== "all" ? { financialYear } : {};
     const [daybookResponse, trialResponse, balanceResponse, profitResponse] = await Promise.all([
-      fetchDaybook(runId, { limit: VOUCHER_PAGE_SIZE, offset: 0 }),
-      fetchTrialBalance(runId),
-      fetchBalanceSheet(runId),
-      fetchProfitLoss(runId),
+      fetchDaybook(runId, { limit: VOUCHER_PAGE_SIZE, offset: 0, ...scopedParams }),
+      fetchTrialBalance(runId, scopedParams),
+      fetchBalanceSheet(runId, scopedParams),
+      fetchProfitLoss(runId, scopedParams),
     ]);
+    if (options.requestId && activeImportRequestRef.current !== options.requestId) return false;
     setDaybookRows(daybookResponse.daybook?.rows || []);
     setDaybookTotal(daybookResponse.daybook?.total || 0);
     setStatements({
@@ -251,6 +282,7 @@ export default function TallyImport() {
       balanceSheet: balanceResponse.statement,
       profitLoss: profitResponse.statement,
     });
+    return true;
   };
 
   const loadVoucherPage = async (runId, page = 1, filters = voucherFilters) => {
@@ -261,7 +293,8 @@ export default function TallyImport() {
     const voucherResponse = await fetchLedgerVouchers(runId, {
       limit: VOUCHER_PAGE_SIZE,
       offset,
-      fiscalYear: importRun?.fiscalYear || selectedFY,
+        fiscalYear: importRun?.fiscalYear || selectedFY,
+        financialYear: reportFinancialYear,
       ...(activeLedger ? { ledgerName: activeLedger } : {}),
       ...(activeType ? { voucherType: activeType } : {}),
       ...(filters.search?.trim() ? { search: filters.search.trim() } : {}),
@@ -272,6 +305,55 @@ export default function TallyImport() {
     setLedgerVoucherTotal(voucherTotal);
     setVoucherPage(page);
   };
+
+  useEffect(() => {
+    let alive = true;
+    const restoreRequestId = activeImportRequestRef.current;
+    const restoreStillCurrent = () => alive && activeImportRequestRef.current === restoreRequestId;
+    const restoreLatestImport = async () => {
+      if (importRun || step !== 1) return;
+      try {
+        const latestResponse = await fetchLatestCompletedImport().catch((err) => {
+          if (/No completed Tally import/i.test(err.message)) return null;
+          throw err;
+        });
+        if (!restoreStillCurrent() || !latestResponse?.importRun?.id) return;
+        const latest = latestResponse.importRun;
+        const importedYears = latest.summary?.financialYears || [];
+        const initialReportFY = importedYears.length === 1 ? importedYears[0] : "all";
+        const scopedParams = initialReportFY && initialReportFY !== "all" ? { financialYear: initialReportFY } : {};
+        const importResponse = Object.keys(scopedParams).length ? await fetchImportRun(latest.id, scopedParams) : latestResponse;
+        if (!restoreStillCurrent()) return;
+        setImportRun(importResponse.importRun);
+        setSelectedFY(importResponse.importRun?.fiscalYear && importResponse.importRun.fiscalYear !== "custom" ? importResponse.importRun.fiscalYear : selectedFY);
+        setPeriodType(importResponse.importRun?.periodType || (importResponse.importRun?.fiscalYear === "custom" ? "custom" : "financial_year"));
+        setAsOnDate(toDateInput(importResponse.importRun?.asOn) || asOnDate);
+        setReportFinancialYear(initialReportFY);
+        setCompanyName(importResponse.importRun?.companyName || "");
+        setVendors(mergeMasterIntoVendors(importResponse.creditors || []));
+        const voucherResponse = await fetchLedgerVouchers(latest.id, {
+          limit: VOUCHER_PAGE_SIZE,
+          offset: 0,
+          fiscalYear: importResponse.importRun?.fiscalYear || latest.fiscalYear || selectedFY,
+          financialYear: initialReportFY,
+        });
+        if (!restoreStillCurrent()) return;
+        setLedgerVouchers(voucherResponse.ledgerVouchers?.rows || voucherResponse.rows || []);
+        setLedgerVoucherTotal(voucherResponse.ledgerVouchers?.total ?? voucherResponse.total ?? 0);
+        const derivedLoaded = await loadDerivedViews(latest.id, initialReportFY, { requestId: restoreRequestId });
+        if (!restoreStillCurrent() || !derivedLoaded) return;
+        setVoucherPage(1);
+        setImportStatus("Restored latest persisted Tally import");
+        setStep(2);
+      } catch (err) {
+        if (restoreStillCurrent()) setImportStatus(`Unable to restore latest import: ${err.message}`);
+      }
+    };
+    restoreLatestImport();
+    return () => { alive = false; };
+    // Restore persisted import once on mount; refresh/re-import is a separate user action.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const updateVoucherFilters = async (updater) => {
     const nextFilters = typeof updater === "function" ? updater(voucherFilters) : updater;
@@ -286,6 +368,32 @@ export default function TallyImport() {
       } finally {
         setLoading(false);
       }
+    }
+  };
+
+  const changeReportFinancialYear = async (financialYear) => {
+    setReportFinancialYear(financialYear);
+    if (!importRun?.id) return;
+    setLoading(true);
+    setError("");
+    try {
+      const scopedParams = financialYear && financialYear !== "all" ? { financialYear } : {};
+      const voucherResponse = await fetchLedgerVouchers(importRun.id, {
+        limit: VOUCHER_PAGE_SIZE,
+        offset: 0,
+        fiscalYear: importRun.fiscalYear || selectedFY,
+        ...scopedParams,
+      });
+      const importResponse = await fetchImportRun(importRun.id, scopedParams);
+      setLedgerVouchers(voucherResponse.ledgerVouchers?.rows || voucherResponse.rows || []);
+      setLedgerVoucherTotal(voucherResponse.ledgerVouchers?.total ?? voucherResponse.total ?? 0);
+      setVendors(mergeMasterIntoVendors(importResponse.creditors || []));
+      setVoucherPage(1);
+      await loadDerivedViews(importRun.id, financialYear);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -308,7 +416,7 @@ export default function TallyImport() {
       return health.companyName ? `Tally server is running (${health.companyName})` : "Tally server is running";
     }
     if (health.serverRunning && health.xmlPostWorking && health.companyDetected === false) return "Tally server is running; company name not confirmed yet";
-    if (health.serverRunning && !health.xmlPostWorking) return "Tally is reachable but XML export failed";
+    if (health.serverRunning && !health.xmlPostWorking) return health.error || health.message || "Tally is reachable but XML export failed";
     if (health.reachable || health.serverRunning) return "Tally server is running";
     const details = [health.message, ...(health.errors || [])]
       .filter(Boolean)
@@ -323,7 +431,7 @@ export default function TallyImport() {
     if (health.portOpen === false) return "TallyPrime is not open or port 9000 is unreachable";
     if (health.serverRunning === false) return health.error || health.message || "Tally server is not running";
     if (health.error === "Tally XML export requires active company context.") return "Tally company context could not be established.";
-    if (health.xmlPostWorking === false) return "Tally is reachable but XML export failed";
+    if (health.xmlPostWorking === false) return health.error || health.message || health.errors?.[0] || "Tally is reachable but XML export failed";
     return null;
   };
 
@@ -335,17 +443,29 @@ export default function TallyImport() {
   };
 
   const handleImport = async () => {
+    const requestId = activeImportRequestRef.current + 1;
+    activeImportRequestRef.current = requestId;
+    const requestStillCurrent = () => activeImportRequestRef.current === requestId;
     setLoading(true);
     setError("");
     setReport(null);
     let progressTimer = null;
     try {
+      const runningImport = await fetchTallyImportStatus();
+      if (!requestStillCurrent()) return;
+      if (runningImport.running) {
+        const active = runningImport.currentImport || {};
+        throw new Error(
+          `A Tally import is already running for ${active.companyName || "the selected company"} (${active.fromDate || "from date"} - ${active.toDate || "to date"}). Started at ${active.startedAt || "recently"}. Please wait for it to finish.`
+        );
+      }
       setImportStatus("Checking Tally connection...");
       const health = await fetchTallyHealth(companyName.trim());
+      if (!requestStillCurrent()) return;
       setTallyHealth(health);
       if (!companyName.trim() && health.companyName) setCompanyName(health.companyName);
       if (health.serverRunning) setImportStatus("Tally server is running");
-      if (health.serverRunning && health.xmlPostWorking === false) setImportStatus("Tally is reachable but XML export failed");
+      if (health.serverRunning && health.xmlPostWorking === false) setImportStatus(health.error || "Tally is reachable but XML export failed");
       if (health.serverRunning && health.xmlPostWorking && health.companyDetected === false) setImportStatus("Company name not confirmed; trying creditor export...");
       const healthError = tallyHealthError(health);
       if (healthError) throw new Error(healthError);
@@ -363,8 +483,10 @@ export default function TallyImport() {
         fromDate: fyConfig.fromDate,
         toDate: fyConfig.toDate,
         asOn: asOnDate,
+        capToAsOn: true,
         companyName: companyName.trim() || health.companyName || "",
       });
+      if (!requestStillCurrent()) return;
       if (progressTimer) {
         window.clearInterval(progressTimer);
         progressTimer = null;
@@ -373,33 +495,46 @@ export default function TallyImport() {
         setTallyHealth((prev) => prev ? { ...prev, companyDetected: true, companyName: data.importRun.companyName } : prev);
       }
       setImportRun(data.importRun);
-      setImportWarnings([
-        ...(data.warnings || []).map((warning) => warning.message || String(warning)),
-        ...(data.ignoredNonSundryCount ? [`Ignored ${data.ignoredNonSundryCount} non-creditor ledgers: ${(data.ignoredNonSundrySamples || []).slice(0, 5).join(", ")}`] : []),
-        ...(data.importRun?.summary?.fallbackUsed ? [`Voucher source: ${data.importRun.summary.voucherSource}. Fallback was used and logged for audit.`] : []),
-      ].filter(Boolean));
+      const importedYears = data.importRun?.summary?.financialYears || [];
+      const initialReportFY = importedYears.length === 1 ? importedYears[0] : "all";
+      setReportFinancialYear(initialReportFY);
+      setImportWarnings([...new Set(
+        (data.warnings || [])
+          .filter((warning) => (warning?.severity || "warning") !== "info")
+          .map((warning) => warning.message || String(warning))
+          .filter(Boolean)
+      )]);
       setVendors(mergeMasterIntoVendors(data.creditors));
       setImportStatus("Loading imported voucher rows...");
       const voucherResponse = await fetchLedgerVouchers(data.importRun.id, {
         limit: VOUCHER_PAGE_SIZE,
         offset: 0,
         fiscalYear: data.importRun.fiscalYear || selectedFY,
+        financialYear: initialReportFY,
       });
+      if (!requestStillCurrent()) return;
       setLedgerVouchers(voucherResponse.ledgerVouchers?.rows || voucherResponse.rows || []);
       setLedgerVoucherTotal(voucherResponse.ledgerVouchers?.total ?? voucherResponse.total ?? 0);
-      await loadDerivedViews(data.importRun.id);
+      const derivedLoaded = await loadDerivedViews(data.importRun.id, initialReportFY, { requestId });
+      if (!requestStillCurrent() || !derivedLoaded) return;
       setVoucherPage(1);
       setImportStatus("Import complete");
       setStep(2);
     } catch (err) {
       if (progressTimer) window.clearInterval(progressTimer);
+      if (!requestStillCurrent()) return;
       setImportStatus(err.message?.includes("0 creditor ledgers detected") ? "0 creditor ledgers detected" : "Import failed");
+      if (err.status === 409 || err.currentImport) {
+        const active = err.currentImport || {};
+        setError(`Could not import from Tally: import already running for ${active.companyName || "the selected company"} (${active.fromDate || "from date"} - ${active.toDate || "to date"}). Started at ${active.startedAt || "recently"}.`);
+        return;
+      }
       const message = err.message === "Tally XML export requires active company context."
         ? "Tally company context could not be established."
         : err.message;
       setError(`Could not import from Tally: ${message}`);
     } finally {
-      setLoading(false);
+      if (requestStillCurrent()) setLoading(false);
     }
   };
 
@@ -425,10 +560,41 @@ export default function TallyImport() {
 
   const handleBulkVerify = async (rows) => {
     setError("");
+    setNotice("");
     try {
-      await bulkVerify(rows, patchVendorMaster);
+      const importRows = udyamRows.length ? udyamRows : parseUdyamCsvRows(udyamCsv);
+      const importNameSet = new Set(importRows.map((row) => normalizeVendorKey(row.vendorName)).filter(Boolean));
+      const tableRows = importNameSet.size
+        ? rows.filter((vendor) => !importNameSet.has(normalizeVendorKey(vendor.name)))
+        : rows;
+      const tableVerifiedCount = await bulkVerify(tableRows, patchVendorMaster);
+      let importSummary = null;
+
+      if (importRows.length) {
+        const stats = validateUdyamImportRows(importRows);
+        if (stats.withVendorName !== stats.total || stats.withUdyamNumber !== stats.total) {
+          throw new Error("Every uploaded Udyam row must include Vendor Name and Udyam Number.");
+        }
+        setUdyamActivity([]);
+        setUdyamImporting(true);
+        const response = await importUdyamRowsLive(importRows, { autoVerify: true, sourceFileName: udyamFileName }, (event) => {
+          setUdyamActivity((prev) => [...prev.slice(-199), event]);
+        });
+        importSummary = response.summary || {};
+        applyUdyamImportSummary(importSummary);
+      }
+
+      const uploadedProcessed = importSummary?.imported || 0;
+      const uploadedVerified = importSummary?.verified || 0;
+      const totalProcessed = uploadedProcessed + tableVerifiedCount;
+      setNotice(totalProcessed > 0
+        ? `Bulk verification completed: ${uploadedProcessed} uploaded Udyam rows processed (${uploadedVerified} verified), plus ${tableVerifiedCount} table-entered Udyam ${tableVerifiedCount === 1 ? "number" : "numbers"}.`
+        : "No entered Udyam numbers found for bulk verification. Enter Udyam numbers or upload/paste Udyam rows."
+      );
     } catch (err) {
       setError(err.message);
+    } finally {
+      setUdyamImporting(false);
     }
   };
 
@@ -498,19 +664,23 @@ export default function TallyImport() {
         setUdyamActivity((prev) => [...prev.slice(-199), event]);
       });
       const summary = response.summary || {};
-      setNotice(`Udyam import complete: ${summary.verified || 0} verified, ${summary.manualReview || 0} manual review, ${summary.unmatched || 0} unmatched, ${summary.failed || 0} failed.`);
-      const vendorByName = new Map((summary.results || []).filter((row) => row.vendor?.normalizedVendorName).map((row) => [row.vendor.normalizedVendorName, row.vendor]));
-      setVendors((prev) => prev.map((vendor) => {
-        const normalized = vendor.normalizedVendorName || vendor.vendorMaster?.normalizedVendorName;
-        const updated = vendorByName.get(normalized);
-        return updated ? { ...vendor, vendorMaster: updated } : vendor;
-      }));
+      setNotice(`Udyam import complete: ${summary.verified || 0} verified (${summary.livePortalVerified || 0} live portal, ${summary.fallbackVerified || 0} fallback), ${summary.manualReview || 0} manual review, ${summary.unmatched || 0} unmatched, ${summary.failed || 0} failed.`);
+      applyUdyamImportSummary(summary);
     } catch (err) {
       setError(err.message);
       setUdyamActivity((prev) => [...prev, { type: "stream_error", status: "failed", message: err.message, timestamp: new Date().toISOString() }]);
     } finally {
       setUdyamImporting(false);
     }
+  };
+
+  const applyUdyamImportSummary = (summary = {}) => {
+    const vendorByName = new Map((summary.results || []).filter((row) => row.vendor?.normalizedVendorName).map((row) => [row.vendor.normalizedVendorName, row.vendor]));
+    setVendors((prev) => prev.map((vendor) => {
+      const normalized = vendor.normalizedVendorName || vendor.vendorMaster?.normalizedVendorName;
+      const updated = vendorByName.get(normalized);
+      return updated ? { ...vendor, vendorMaster: updated } : vendor;
+    }));
   };
 
   const generateReport = async () => {
@@ -521,13 +691,27 @@ export default function TallyImport() {
     setLoading(true);
     setError("");
     try {
-      const response = await createMSMEReport(importRun.id, selectedFY, asOnDate);
+      const response = await createMSMEReport(importRun.id, reportFinancialYear === "all" ? "all" : reportFinancialYear, asOnDate);
       setReport(response.report);
       setStep(4);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleReportDownload = async (kind, action) => {
+    setError("");
+    setNotice("");
+    setDownloadingReport(kind);
+    try {
+      await action();
+      setNotice(`${kind} download started.`);
+    } catch (err) {
+      setError(`${kind} download failed: ${err.message}`);
+    } finally {
+      setDownloadingReport("");
     }
   };
 
@@ -542,12 +726,12 @@ export default function TallyImport() {
       {notice && <div className="bg-green-50 border border-green-200 text-green-700 rounded-xl p-3 mb-4 text-sm font-semibold">{notice}</div>}
       {importWarnings.length > 0 && (
         <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-xl p-3 mb-4 text-sm font-semibold">
-          {importWarnings.slice(0, 3).map((warning) => <p key={warning}>{warning}</p>)}
+          {importWarnings.slice(0, 3).map((warning, index) => <p key={`${warning}-${index}`}>{warning}</p>)}
         </div>
       )}
 
       <div className="rounded-2xl p-4 mb-4 border border-blue-200 bg-blue-50">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
           <label className="block text-sm font-semibold text-blue-700">
             Financial Year
             <select
@@ -560,7 +744,7 @@ export default function TallyImport() {
                   setSelectedFY(value);
                   setAsOnDate(defaultAsOnDate(value));
                 }
-                resetAll();
+                setNotice("Period changed. Existing imported data is kept until you click Fetch / Refresh from Tally.");
               }}
               className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal bg-white">
               {Object.keys(FY_CONFIG).map((fy) => <option key={fy} value={fy}>{FY_CONFIG[fy].label}</option>)}
@@ -590,6 +774,27 @@ export default function TallyImport() {
               className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal"
             />
           </label>
+          <label className="block text-sm font-semibold text-blue-700 md:col-span-2">
+            Tally company name
+            <input
+              value={companyName}
+              onChange={(event) => setCompanyName(event.target.value)}
+              placeholder={tallyCompanyPlaceholder}
+              className="mt-1 w-full border border-blue-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              list="tally-company-options"
+            />
+          </label>
+          <button
+            onClick={handleImport}
+            disabled={loading}
+            className="bg-green-600 text-white px-4 py-2 rounded-lg font-semibold disabled:opacity-50">
+            {loading ? "Fetching..." : importRun ? "Fetch / Refresh from Tally" : "Start Tally Import"}
+          </button>
+          <datalist id="tally-company-options">
+            {(tallyHealth?.companyNames || []).map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
         </div>
         <p className="text-sm mt-2 font-semibold text-blue-700">
           Applicable: {fyConfig.section} of {fyConfig.act}
@@ -605,6 +810,43 @@ export default function TallyImport() {
           </p>
         )}
       </div>
+
+      {importRun && (
+        <div className="bg-white border border-gray-200 rounded-xl p-4 mb-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+            <label className="block text-sm font-semibold text-gray-700">
+              Report Financial Year
+              <select
+                value={reportFinancialYear}
+                onChange={(event) => changeReportFinancialYear(event.target.value)}
+                className="mt-1 w-full border border-gray-200 rounded-lg px-3 py-2 text-sm text-gray-800 font-normal bg-white">
+                <option value="all">All FY</option>
+                {availableReportYears.map((fy) => <option key={fy} value={fy}>FY {fy}</option>)}
+              </select>
+            </label>
+            <div className="text-sm text-gray-700 md:col-span-3">
+              <p className="font-semibold">Selected FY: {reportFinancialYear === "all" ? "All FY" : `FY ${reportFinancialYear}`}</p>
+              <p className="text-xs text-gray-500">
+                Report Period: {scopeLabelFor(importRun, reportFinancialYear)} | As On: {formatDisplayDate(importRun.asOn || asOnDate)}
+              </p>
+              {isScopeCapped(importRun, reportFinancialYear) && (
+                <p className="text-xs text-yellow-700 font-semibold">Data is capped by the selected as-on date.</p>
+              )}
+            </div>
+          </div>
+          {reportFinancialYear === "all" && importRun.summary?.financialYearPeriods?.length > 1 && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-3">
+              {importRun.summary.financialYearPeriods.map((period) => (
+                <div key={period.financialYear} className="bg-gray-50 rounded-lg p-3 text-xs text-gray-700">
+                  <p className="font-bold">FY {period.financialYear}</p>
+                  <p>{formatDisplayDate(period.reportFromDate)} - {formatDisplayDate(period.reportToDate)}</p>
+                  {period.cappedByAsOn && <p className="text-yellow-700 font-semibold">Capped by as-on</p>}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="flex gap-2 mb-4 flex-wrap">
         {["Import", "Verify", "Review", "Report"].map((label, index) => (
@@ -627,24 +869,7 @@ export default function TallyImport() {
           <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 mb-4 text-sm font-semibold text-gray-700">
             {loading ? importStatus : importStatus}
           </div>
-          <label className="block text-sm font-semibold text-gray-700 mb-4">
-            Tally company name
-            <input
-              value={companyName}
-              onChange={(event) => setCompanyName(event.target.value)}
-              placeholder={tallyHealth?.companyName || "Auto-detect from Tally"}
-              className="mt-1 w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-normal focus:outline-none focus:ring-2 focus:ring-blue-500"
-              list="tally-company-options"
-            />
-            <datalist id="tally-company-options">
-              {(tallyHealth?.companyNames || []).map((name) => (
-                <option key={name} value={name} />
-              ))}
-            </datalist>
-          </label>
-          <button onClick={handleImport} disabled={loading} className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold disabled:opacity-50">
-            {loading ? "Fetching..." : "Start Tally Import"}
-          </button>
+          <p className="text-xs text-gray-500 font-semibold">Use the Tally company name field and fetch button in the blue panel above.</p>
         </div>
       )}
 
@@ -770,13 +995,42 @@ export default function TallyImport() {
               <p className="text-sm text-gray-500">Report snapshot: {report.id}</p>
             </div>
             <div className="flex gap-2">
-              <button onClick={() => downloadReportFile(report.id, "csv")} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-semibold">Download CSV</button>
-              <button onClick={() => downloadReportFile(report.id, "xml")} className="bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold">Download XML</button>
-              <button onClick={() => downloadUrl(reportEvidenceBundleUrl(report.id), `MSME_Evidence_Bundle_${report.id}.zip`)} className="bg-gray-800 text-white px-4 py-2 rounded-lg text-sm font-semibold">Evidence Bundle</button>
-              <button onClick={() => downloadUrl(reportTallyReconciliationUrl(report.id), `MSME_Tally_Reconciliation_${report.id}.csv`)} className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg text-sm font-semibold">Reconciliation</button>
+              <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("CSV", () => downloadReportFile(report.id, "csv"))} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">{downloadingReport === "CSV" ? "Starting..." : "Download CSV"}</button>
+              <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("Excel Workbook", () => downloadReportFile(report.id, "xlsx"))} className="bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">{downloadingReport === "Excel Workbook" ? "Starting..." : "Download Excel Workbook"}</button>
+              <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("PDF", () => downloadReportFile(report.id, "pdf"))} className="bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">{downloadingReport === "PDF" ? "Starting..." : "Download PDF"}</button>
+              <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("XML", () => downloadReportFile(report.id, "xml"))} className="bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">{downloadingReport === "XML" ? "Starting..." : "Download XML"}</button>
+              <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("Evidence Bundle", () => downloadUrl(reportEvidenceBundleUrl(report.id), `MSME_Evidence_Bundle_${report.id}.zip`))} className="bg-gray-800 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">{downloadingReport === "Evidence Bundle" ? "Starting..." : "Evidence Bundle"}</button>
+              <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("Reconciliation", () => downloadUrl(reportTallyReconciliationUrl(report.id), `MSME_Tally_Reconciliation_${report.id}.csv`))} className="bg-gray-200 text-gray-800 px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">{downloadingReport === "Reconciliation" ? "Starting..." : "Reconciliation"}</button>
             </div>
           </div>
+          <p className="text-sm text-gray-600 mb-4">
+            Selected FY: <span className="font-semibold">{report.summary?.selectedFinancialYear === "all" ? "All FY" : `FY ${report.summary?.selectedFinancialYear}`}</span>
+            {" | "}Report Period: <span className="font-semibold">{report.summary?.reportPeriodLabel}</span>
+            {" | "}As On: <span className="font-semibold">{formatDisplayDate(report.summary?.asOnDate)}</span>
+          </p>
+          {report.summary?.capWarning && <p className="text-sm text-yellow-700 font-semibold mb-4">{report.summary.capWarning}</p>}
+          {report.summary?.noVerifiedMSMEWarning && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3 mb-4 text-sm text-yellow-800 font-semibold">
+              {report.summary.noVerifiedMSMEWarning}
+            </div>
+          )}
+          {report.summary?.selectedFinancialYear === "all" && Array.isArray(report.summary?.financialYearSummaries) && report.summary.financialYearSummaries.length > 0 && (
+            <div className="mb-4">
+              <h4 className="text-sm font-bold text-gray-700 mb-2">All FY grouped summary</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                {report.summary.financialYearSummaries.map((row) => (
+                  <div key={row.financialYear} className="border border-gray-100 rounded-lg p-3 text-xs">
+                    <p className="font-bold text-gray-800">FY {row.financialYear}</p>
+                    <p>Payable Rs {Number(row.totalPayable || 0).toLocaleString("en-IN")}</p>
+                    <p>Delayed Rs {Number(row.delayedAmount || 0).toLocaleString("en-IN")}</p>
+                    <p>Interest Rs {Number(row.interest || 0).toLocaleString("en-IN")}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <ReportMetrics summary={report.summary} />
+          <AuditPreviewPanels schedules={report.schedules || {}} />
           <ReportTable rows={report.report} />
         </div>
       )}
@@ -1050,6 +1304,28 @@ function defaultAsOnDate(fy) {
   return today > fyEnd ? fyEnd : today;
 }
 
+function scopeFor(importRun, financialYear) {
+  if (!importRun) return null;
+  if (financialYear && financialYear !== "all") {
+    return (importRun.summary?.financialYearPeriods || []).find((period) => period.financialYear === financialYear) || null;
+  }
+  return {
+    reportFromDate: importRun.fromDate,
+    reportToDate: importRun.toDate,
+    cappedByAsOn: Boolean(importRun.summary?.cappedByAsOn),
+  };
+}
+
+function scopeLabelFor(importRun, financialYear) {
+  const scope = scopeFor(importRun, financialYear);
+  if (!scope) return "Not available";
+  return `${formatDisplayDate(toDateInput(scope.reportFromDate || importRun.fromDate))} - ${formatDisplayDate(toDateInput(scope.reportToDate || importRun.toDate))}`;
+}
+
+function isScopeCapped(importRun, financialYear) {
+  return Boolean(scopeFor(importRun, financialYear)?.cappedByAsOn);
+}
+
 function isActionableVendor(vendor) {
   const actionStatus = vendor.vendorMaster?.actionStatus || "pending_action";
   if (actionStatus === "not_required_zero_outstanding" || actionStatus === "non_msme" || actionStatus === "verified_msme") return false;
@@ -1105,7 +1381,7 @@ function UdyamImportPanel({ csvText, setCsvText, onImport, onFile, onTemplate, r
       <div className="flex items-start justify-between gap-3 flex-wrap mb-3">
         <div>
           <h3 className="text-lg font-bold text-gray-800">Udyam Excel / CSV Import</h3>
-          <p className="text-xs text-gray-500 mt-1">Vendor Name and Udyam Number are mandatory. Payment Terms is optional and defaults to 45 days.</p>
+          <p className="text-xs text-gray-500 mt-1">Vendor Name and Udyam Number are mandatory. Live portal is tried first; if it fails, backend fallback data is checked automatically.</p>
         </div>
         <div className="flex gap-2 flex-wrap">
           <button onClick={onTemplate} className="bg-gray-100 text-gray-800 px-4 py-2 rounded-lg text-sm font-semibold">Template</button>
@@ -1141,6 +1417,7 @@ function UdyamImportPanel({ csvText, setCsvText, onImport, onFile, onTemplate, r
                 <th className="text-left p-2">Vendor</th>
                 <th className="text-left p-2">Udyam</th>
                 <th className="text-left p-2">Payment Terms</th>
+                <th className="text-left p-2">PAN</th>
               </tr>
             </thead>
             <tbody>
@@ -1149,6 +1426,7 @@ function UdyamImportPanel({ csvText, setCsvText, onImport, onFile, onTemplate, r
                   <td className="p-2">{row.vendorName}</td>
                   <td className="p-2">{row.udyamNumber}</td>
                   <td className="p-2">{row.paymentTerms ? `${row.paymentTerms} days` : ""}</td>
+                  <td className="p-2">{row.panNumber || ""}</td>
                 </tr>
               ))}
             </tbody>
@@ -1174,6 +1452,11 @@ function UdyamImportPanel({ csvText, setCsvText, onImport, onFile, onTemplate, r
             <div key={`${event.timestamp || ""}-${index}`} className="px-3 py-2 border-t text-xs">
               <span className="font-mono text-gray-500">{event.type}</span>
               {event.vendorName && <span className="ml-2 font-semibold text-gray-800">{event.vendorName}</span>}
+              {event.source && (
+                <span className={`ml-2 px-2 py-0.5 rounded-full font-semibold ${event.source === "live_portal" ? "bg-green-50 text-green-700" : event.source === "fallback_upload" ? "bg-blue-50 text-blue-700" : "bg-yellow-50 text-yellow-700"}`}>
+                  {event.source === "live_portal" ? "Live portal" : event.source === "fallback_upload" ? "Fallback" : "Manual"}
+                </span>
+              )}
               <span className={event.type?.includes("failed") || event.type === "stream_error" ? "ml-2 text-red-700" : "ml-2 text-gray-600"}>
                 {event.message || event.status || ""}
               </span>
@@ -1251,6 +1534,7 @@ function CreditorLedgerSummary({ vendors }) {
               <th className="text-right p-2">Closing</th>
               <th className="text-right p-2">Days</th>
               <th className="text-left p-2">Balance Source</th>
+              <th className="text-left p-2">Mismatch Flag</th>
             </tr>
           </thead>
           <tbody>
@@ -1271,6 +1555,7 @@ function CreditorLedgerSummary({ vendors }) {
                     <span className="text-green-700">Ledger closing credit</span>
                   )}
                 </td>
+                <td className="p-2 text-xs font-semibold">{vendor.outstandingMismatch ? "YES" : "NO"}</td>
               </tr>
             ))}
           </tbody>
@@ -1304,13 +1589,34 @@ function formatLedgerBalance(value, raw) {
 
 function ReportMetrics({ summary }) {
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-      <Metric label="Report Vendors" value={summary.reportVendors || 0} color="bg-green-100 text-green-700" />
-      <Metric label="Disallowed" value={`Rs ${(summary.totalDisallowed || 0).toLocaleString("en-IN")}`} color="bg-red-100 text-red-700" />
-      <Metric label="Tax Impact" value={`Rs ${(summary.totalTaxImpact || 0).toLocaleString("en-IN")}`} color="bg-orange-100 text-orange-700" />
-      <Metric label="Interest" value={`Rs ${(summary.totalInterest || 0).toLocaleString("en-IN")}`} color="bg-yellow-100 text-yellow-700" />
-    </div>
+    <>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <Metric label="Report Vendors" value={summary.reportVendors || 0} color="bg-green-100 text-green-700" />
+        <Metric label="Disallowed" value={`Rs ${(summary.totalDisallowed || 0).toLocaleString("en-IN")}`} color="bg-red-100 text-red-700" />
+        <Metric label="Tax Impact" value={`Rs ${(summary.totalTaxImpact || 0).toLocaleString("en-IN")}`} color="bg-orange-100 text-orange-700" />
+        <Metric label="Interest" value={`Rs ${(summary.totalInterest || 0).toLocaleString("en-IN")}`} color="bg-yellow-100 text-yellow-700" />
+      </div>
+      {summary.selectedFinancialYear === "all" && Array.isArray(summary.financialYearSummaries) && summary.financialYearSummaries.length > 0 && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-6">
+          {summary.financialYearSummaries.map((row) => (
+            <div key={row.financialYear} className="border border-gray-100 rounded-lg p-4">
+              <p className="font-bold text-gray-800">FY {row.financialYear}</p>
+              <p className="text-xs text-gray-500 mt-1">{row.totalVendors} vendors | {row.msmeVendors} MSME</p>
+              <p className="text-sm font-semibold text-gray-800 mt-2">Payable Rs {Number(row.totalPayable || 0).toLocaleString("en-IN")}</p>
+              <p className="text-xs text-gray-600">Delayed Rs {Number(row.delayedAmount || 0).toLocaleString("en-IN")} | Interest Rs {Number(row.interest || 0).toLocaleString("en-IN")}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
   );
+}
+
+export function reportWarningMessages(summary = {}) {
+  return [
+    summary.capWarning,
+    summary.noVerifiedMSMEWarning,
+  ].filter(Boolean);
 }
 
 function VendorReviewTable({ vendors }) {
@@ -1338,13 +1644,29 @@ function ReportTable({ rows }) {
   return (
     <div className="max-h-96 overflow-y-auto">
       <table className="w-full text-sm">
-        <thead className="sticky top-0 bg-gray-50"><tr><th className="text-left p-2">Vendor</th><th className="text-left p-2">Udyam</th><th className="text-left p-2">Type</th><th className="text-right p-2">Disallowed</th><th className="text-right p-2">Interest</th></tr></thead>
+        <thead className="sticky top-0 bg-gray-50">
+          <tr>
+            <th className="text-left p-2">Vendor</th>
+            <th className="text-left p-2">PAN</th>
+            <th className="text-left p-2">Udyam</th>
+            <th className="text-left p-2">Type</th>
+            <th className="text-right p-2">Ledger Outstanding</th>
+            <th className="text-right p-2">Allowed Days</th>
+            <th className="text-right p-2">Delay Days</th>
+            <th className="text-right p-2">FIFO Disallowed</th>
+            <th className="text-right p-2">Interest</th>
+          </tr>
+        </thead>
         <tbody>
           {rows.map((row) => (
             <tr key={row.vendorName} className="border-t">
               <td className="p-2 font-semibold text-xs">{row.vendorName}</td>
+              <td className="p-2 text-xs font-mono">{row.panNumber || "-"}</td>
               <td className="p-2 text-xs">{row.udyamNumber}</td>
               <td className="p-2 text-xs">{row.enterpriseType}</td>
+              <td className="p-2 text-right text-xs">{Number(row.ledgerOutstandingAmount ?? row.outstandingAmount ?? 0).toLocaleString("en-IN")}</td>
+              <td className="p-2 text-right text-xs">{row.allowedPaymentDays || row.agreedPaymentDays || "-"}</td>
+              <td className="p-2 text-right text-xs">{row.delayDays || 0}</td>
               <td className="p-2 text-right text-xs">{row.disallowed.toLocaleString("en-IN")}</td>
               <td className="p-2 text-right text-xs">{row.interest.toLocaleString("en-IN")}</td>
             </tr>
@@ -1352,5 +1674,130 @@ function ReportTable({ rows }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function AuditPreviewPanels({ schedules }) {
+  return (
+    <div className="space-y-5 mb-6">
+      <ScheduleIIIDisclosurePreview rows={schedules.scheduleIIIDisclosure || []} text={schedules.auditorDisclosureText} />
+      <TaxDisallowancePreview rows={schedules.taxDisallowanceSummary || []} />
+      <Form3CDPreview clause22={schedules.clause22 || []} clause26={schedules.clause26 || []} />
+      <VoucherEvidencePreview rows={schedules.voucherWiseDelayEvidence || schedules.invoiceAging || []} />
+    </div>
+  );
+}
+
+function CompactScheduleTable({ title, rows, columns, tone = "gray" }) {
+  if (!rows?.length) return null;
+  const headerClass = tone === "orange" ? "bg-orange-50" : tone === "red" ? "bg-red-50" : tone === "blue" ? "bg-blue-50" : "bg-gray-50";
+  return (
+    <div>
+      <h4 className="text-sm font-bold text-gray-700 mb-2">{title}</h4>
+      <div className="max-h-64 overflow-auto border border-gray-100 rounded-xl">
+        <table className="w-full text-sm">
+          <thead className={`sticky top-0 ${headerClass}`}>
+            <tr>{columns.map((column) => <th key={column.key} className="text-left p-2">{column.label}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.slice(0, 25).map((row, index) => (
+              <tr key={`${title}-${index}`} className="border-t">
+                {columns.map((column) => (
+                  <td key={column.key} className="p-2 text-xs">
+                    {column.money ? Number(row[column.key] || 0).toLocaleString("en-IN") : String(row[column.key] ?? "-")}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {rows.length > 25 && <p className="text-xs text-gray-500 mt-1">Showing first 25 rows. Download Excel workbook for full verification.</p>}
+    </div>
+  );
+}
+
+function ScheduleIIIDisclosurePreview({ rows, text }) {
+  return (
+    <div className="border border-blue-100 rounded-xl p-4">
+      <CompactScheduleTable
+        title="Schedule III MSME Disclosure Preview"
+        rows={rows}
+        tone="blue"
+        columns={[
+          { key: "disclosureItem", label: "Disclosure Item" },
+          { key: "amount", label: "Amount / Text", money: false },
+          { key: "sourceSchedule", label: "Source" },
+          { key: "notes", label: "Notes" },
+        ]}
+      />
+      {text && <p className="text-xs text-gray-600 mt-3">{text}</p>}
+    </div>
+  );
+}
+
+function TaxDisallowancePreview({ rows }) {
+  return (
+    <CompactScheduleTable
+      title="Tax Disallowance Preview - 43B(h) Principal and Section 23 Interest"
+      rows={rows}
+      tone="red"
+      columns={[
+        { key: "financialYear", label: "FY" },
+        { key: "vendorName", label: "Vendor" },
+        { key: "invoiceNumber", label: "Invoice" },
+        { key: "disallowanceType", label: "Type" },
+        { key: "principalDisallowance", label: "Principal", money: true },
+        { key: "interestPermanentDisallowance", label: "Interest", money: true },
+      ]}
+    />
+  );
+}
+
+function Form3CDPreview({ clause22, clause26 }) {
+  return (
+    <div className="grid lg:grid-cols-2 gap-4">
+      <CompactScheduleTable
+        title="Form 3CD Clause 22"
+        rows={clause22}
+        columns={[
+          { key: "financialYear", label: "FY" },
+          { key: "supplier", label: "Supplier" },
+          { key: "interestPayable", label: "Interest Payable", money: true },
+          { key: "amountInadmissible", label: "Inadmissible", money: true },
+        ]}
+      />
+      <CompactScheduleTable
+        title="Form 3CD Clause 26"
+        rows={clause26}
+        columns={[
+          { key: "financialYear", label: "FY" },
+          { key: "supplier", label: "Supplier" },
+          { key: "invoiceNumber", label: "Invoice" },
+          { key: "disallowanceAmount", label: "Disallowance", money: true },
+          { key: "status", label: "Status" },
+        ]}
+      />
+    </div>
+  );
+}
+
+function VoucherEvidencePreview({ rows }) {
+  return (
+    <CompactScheduleTable
+      title="Voucher-wise Delay Evidence"
+      rows={rows}
+      tone="orange"
+      columns={[
+        { key: "financialYear", label: "FY" },
+        { key: "vendorName", label: "Vendor" },
+        { key: "invoiceNumber", label: "Invoice" },
+        { key: "appointedDay", label: "Appointed Day" },
+        { key: "paymentDate", label: "Payment" },
+        { key: "daysDelayed", label: "Delay Days" },
+        { key: "interestAmount", label: "Interest", money: true },
+        { key: "verificationRequired", label: "Verify" },
+      ]}
+    />
   );
 }

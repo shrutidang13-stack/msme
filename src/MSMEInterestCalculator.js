@@ -5,8 +5,10 @@ const initialForm = {
   vendorName: "",
   principal: "",
   invoiceDate: "",
+  acceptanceDate: "",
   asOnDate: new Date().toISOString().slice(0, 10),
-  agreedPaymentDays: "45",
+  hasWrittenAgreement: "no",
+  agreedPaymentDays: "",
   annualInterestRate: "16.5",
 };
 
@@ -38,6 +40,7 @@ export default function MSMEInterestCalculator() {
     try {
       const response = await calculateMSMEInterest({
         ...form,
+        hasWrittenAgreement: form.hasWrittenAgreement === "yes",
         annualInterestRate: Number(form.annualInterestRate || 0) / 100,
       });
       setResult(response.result);
@@ -64,7 +67,15 @@ export default function MSMEInterestCalculator() {
             <Field label="Vendor Name" value={form.vendorName} onChange={(value) => update("vendorName", value)} />
             <Field label="Principal / Outstanding" type="number" value={form.principal} onChange={(value) => update("principal", value)} required />
             <Field label="Invoice Date" type="date" value={form.invoiceDate} onChange={(value) => update("invoiceDate", value)} required />
+            <Field label="Acceptance Date" type="date" value={form.acceptanceDate} onChange={(value) => update("acceptanceDate", value)} />
             <Field label="Payment / As-on Date" type="date" value={form.asOnDate} onChange={(value) => update("asOnDate", value)} required />
+            <label className="block">
+              <span className="block text-xs font-semibold text-gray-700 mb-1">Written Agreement</span>
+              <select value={form.hasWrittenAgreement} onChange={(event) => update("hasWrittenAgreement", event.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
+                <option value="no">No - 15 days</option>
+                <option value="yes">Yes - cap at 45 days</option>
+              </select>
+            </label>
             <Field label="Agreed Payment Days" type="number" value={form.agreedPaymentDays} onChange={(value) => update("agreedPaymentDays", value)} />
             <Field label="Annual Interest Rate (%)" type="number" value={form.annualInterestRate} onChange={(value) => update("annualInterestRate", value)} />
           </div>
@@ -88,6 +99,7 @@ export default function MSMEInterestCalculator() {
               <div className="grid grid-cols-2 gap-3">
                 <ResultMetric label="Days Outstanding" value={result.daysOutstanding} />
                 <ResultMetric label="Allowed Days" value={result.allowedPaymentDays} />
+                <ResultMetric label="Appointed Day" value={result.appointedDay || "N/A"} />
                 <ResultMetric label="Interest" value={`Rs ${formatMoney(result.interest)}`} />
                 <ResultMetric label="Total Payable" value={`Rs ${formatMoney(result.totalPayable)}`} />
               </div>

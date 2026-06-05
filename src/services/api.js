@@ -28,6 +28,9 @@ async function request(path, options = {}) {
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok || data?.success === false) {
     const requestError = new Error(data?.error || `Request failed with ${response.status}`);
+    requestError.status = response.status;
+    requestError.data = data;
+    if (data?.currentImport) requestError.currentImport = data.currentImport;
     if (data?.diagnostics) requestError.diagnostics = data.diagnostics;
     throw requestError;
   }
@@ -39,11 +42,15 @@ export async function fetchHealth() {
   return response.json();
 }
 
-export async function importFromTally({ periodType, fiscalYear, fromDate, toDate, asOn, companyName }) {
+export async function importFromTally({ periodType, fiscalYear, fromDate, toDate, asOn, capToAsOn, companyName }) {
   return request("/api/tally/import", {
     method: "POST",
-    body: JSON.stringify({ periodType, fiscalYear, fromDate, toDate, asOn, companyName }),
+    body: JSON.stringify({ periodType, fiscalYear, fromDate, toDate, asOn, capToAsOn, companyName }),
   });
+}
+
+export async function fetchTallyImportStatus() {
+  return request("/api/tally/import/status");
 }
 
 export async function fetchTallyHealth(companyName = "") {
@@ -51,8 +58,14 @@ export async function fetchTallyHealth(companyName = "") {
   return request(`/api/tally/health${query}`);
 }
 
-export async function fetchImportRun(id) {
-  return request(`/api/tally/imports/${id}`);
+export async function fetchImportRun(id, params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "")).toString();
+  return request(`/api/tally/imports/${id}${query ? `?${query}` : ""}`);
+}
+
+export async function fetchLatestCompletedImport(params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "")).toString();
+  return request(`/api/tally/imports/latest${query ? `?${query}` : ""}`);
 }
 
 export async function fetchLedgerVouchers(importRunId, params = {}) {
@@ -110,16 +123,19 @@ export async function fetchDaybook(importRunId, params = {}) {
   return request(`/api/tally/imports/${importRunId}/daybook${query ? `?${query}` : ""}`);
 }
 
-export async function fetchTrialBalance(importRunId) {
-  return request(`/api/tally/imports/${importRunId}/trial-balance`);
+export async function fetchTrialBalance(importRunId, params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "")).toString();
+  return request(`/api/tally/imports/${importRunId}/trial-balance${query ? `?${query}` : ""}`);
 }
 
-export async function fetchBalanceSheet(importRunId) {
-  return request(`/api/tally/imports/${importRunId}/balance-sheet`);
+export async function fetchBalanceSheet(importRunId, params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "")).toString();
+  return request(`/api/tally/imports/${importRunId}/balance-sheet${query ? `?${query}` : ""}`);
 }
 
-export async function fetchProfitLoss(importRunId) {
-  return request(`/api/tally/imports/${importRunId}/profit-loss`);
+export async function fetchProfitLoss(importRunId, params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "")).toString();
+  return request(`/api/tally/imports/${importRunId}/profit-loss${query ? `?${query}` : ""}`);
 }
 
 export async function fetchVerificationQueue() {
@@ -249,6 +265,61 @@ export async function fetchReport(id) {
   return request(`/api/reports/${id}`);
 }
 
+export async function fetchReportSchedule(id, schedule) {
+  return request(`/api/reports/${id}/${schedule}`);
+}
+
+export async function fetchCarryForwardRegister(id, params = {}) {
+  const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== "")).toString();
+  return request(`/api/reports/${id}/carry-forward${query ? `?${query}` : ""}`);
+}
+
+export async function fetchTaxAuditReports() {
+  return request("/api/tax-audit/reports");
+}
+
+export async function createTaxAuditReport(payload) {
+  return request("/api/tax-audit/reports", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchTaxAuditReport(id) {
+  return request(`/api/tax-audit/reports/${id}`);
+}
+
+export async function updateTaxAuditAssessee(id, payload) {
+  return request(`/api/tax-audit/reports/${id}/assessee`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateTaxAuditAuditor(id, payload) {
+  return request(`/api/tax-audit/reports/${id}/auditor`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateTaxAuditClause(id, clauseNo, payload) {
+  return request(`/api/tax-audit/reports/${id}/clauses/${clauseNo}`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function validateTaxAuditReport(id) {
+  return request(`/api/tax-audit/reports/${id}/validate`, { method: "POST" });
+}
+
+export function taxAuditDownloadUrl(id, extension) {
+  if (extension === "pdf") return `${API_BASE_URL}/api/tax-audit/reports/${id}/preview.pdf`;
+  if (extension === "zip") return `${API_BASE_URL}/api/tax-audit/reports/${id}/export.zip`;
+  return `${API_BASE_URL}/api/tax-audit/reports/${id}/download.json`;
+}
+
 export function reportDownloadUrl(id, extension) {
   return `${API_BASE_URL}/api/reports/${id}/download.${extension}`;
 }
@@ -293,8 +364,33 @@ export async function startMcaMsme1Upload(filingId, mcaUserId = "") {
   });
 }
 
+export async function uploadMcaMsme1Excel(payload) {
+  return request("/api/mca/msme1/upload-excel", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function validateMcaMsme1(filingId) {
+  return request("/api/mca/msme1/validate", {
+    method: "POST",
+    body: JSON.stringify({ filingId }),
+  });
+}
+
+export async function generateMcaMsme1Xml(payload) {
+  return request("/api/mca/msme1/generate-xml", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export function mcaMsme1DownloadUrl(id) {
   return `${API_BASE_URL}/api/mca/msme1/filings/${id}/download`;
+}
+
+export function mcaMsme1XmlDownloadUrl(id) {
+  return `${API_BASE_URL}/api/mca/msme1/xml/${id}/download`;
 }
 
 export function auditTrailDownloadUrl(format = "csv") {
@@ -305,28 +401,40 @@ export async function downloadReportFile(id, extension) {
   const response = await fetch(reportDownloadUrl(id, extension), {
     headers: await authHeaders({ "Content-Type": undefined }),
   });
-  if (!response.ok) throw new Error(`Download failed with ${response.status}`);
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    throw new Error(message || `Download failed with ${response.status}`);
+  }
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `MSME_Report_${id}.${extension}`;
+  anchor.download = response.headers.get("content-disposition")?.match(/filename="?([^"]+)"?/i)?.[1] || `MSME_Report_${id}.${extension}`;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 export async function downloadUrl(url, filename) {
   const response = await fetch(url, {
     headers: await authHeaders({ "Content-Type": undefined }),
   });
-  if (!response.ok) throw new Error(`Download failed with ${response.status}`);
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    throw new Error(message || `Download failed with ${response.status}`);
+  }
   const blob = await response.blob();
   const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = objectUrl;
   anchor.download = filename;
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
   anchor.click();
-  URL.revokeObjectURL(objectUrl);
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
 }
 
 export async function askComplianceAssistant(question) {

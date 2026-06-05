@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const db = require("../config/database");
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
 const { validateUdyamNumber, verifyUdyamNumber } = require("../services/udyamVerifier.service");
+const udyamFallbackService = require("../services/udyamFallback.service");
 const { isSundryCreditorRow } = require("../utils/sundryCreditor");
 
 function nowIso() {
@@ -45,6 +46,14 @@ function mapVendor(row) {
     actionStatus: row.action_status || deriveActionStatus({ ...row, udyam_status: udyamStatus, verification_status: verificationStatus }),
     excludedReason: row.excluded_reason || "",
     evidenceUrl: row.evidence_url || "",
+    verificationSource: row.verification_source || "manual",
+    evidenceLink: row.evidence_link || row.evidence_url || row.udyam_proof_file_url || "",
+    evidenceDocumentType: row.evidence_document_type || "",
+    approvedBy: row.approved_by || row.reviewed_by || row.udyam_verified_by || "",
+    approvedAt: row.approved_at || row.reviewed_at || row.udyam_verified_at || "",
+    writtenAgreementDefault: Boolean(row.written_agreement_default),
+    agreementCreditDays: Number(row.agreement_credit_days || row.agreed_payment_days || 0),
+    agreementEvidenceLink: row.agreement_evidence_link || "",
     proofNotes: row.proof_notes || "",
     reviewStatus: row.review_status || "queued",
     reviewedBy: row.reviewed_by || "",
@@ -151,7 +160,7 @@ function upsertVendorStatus(input, actor = "unknown", source = "manual") {
     enterprise_name: input.enterpriseName || "",
     registration_validity: input.registrationValidity || "",
     registration_date: input.registrationDate || "",
-    verified_at: input.verifiedAt || oldVendor?.verifiedAt || (isMSME ? timestamp : ""),
+    verified_at: input.verifiedAt || oldVendor?.verifiedAt || (verificationStatus === "verified" ? timestamp : ""),
     last_verified_at: input.lastVerifiedAt || timestamp,
     udyam_status: udyamStatus,
     udyam_proof_file_url: input.udyamProofFileUrl ?? oldVendor?.udyamProofFileUrl ?? "",
@@ -166,6 +175,14 @@ function upsertVendorStatus(input, actor = "unknown", source = "manual") {
     }),
     excluded_reason: input.excludedReason ?? oldVendor?.excludedReason ?? "",
     evidence_url: input.evidenceUrl ?? oldVendor?.evidenceUrl ?? input.udyamProofFileUrl ?? oldVendor?.udyamProofFileUrl ?? "",
+    verification_source: input.verificationSource ?? oldVendor?.verificationSource ?? source ?? "manual",
+    evidence_link: input.evidenceLink ?? oldVendor?.evidenceLink ?? input.evidenceUrl ?? oldVendor?.evidenceUrl ?? input.udyamProofFileUrl ?? oldVendor?.udyamProofFileUrl ?? "",
+    evidence_document_type: input.evidenceDocumentType ?? oldVendor?.evidenceDocumentType ?? "",
+    approved_by: input.approvedBy ?? oldVendor?.approvedBy ?? input.reviewedBy ?? oldVendor?.reviewedBy ?? "",
+    approved_at: input.approvedAt ?? oldVendor?.approvedAt ?? input.reviewedAt ?? oldVendor?.reviewedAt ?? "",
+    written_agreement_default: input.writtenAgreementDefault ?? oldVendor?.writtenAgreementDefault ? 1 : 0,
+    agreement_credit_days: Number(input.agreementCreditDays ?? input.agreedPaymentDays ?? oldVendor?.agreementCreditDays ?? 0) || 0,
+    agreement_evidence_link: input.agreementEvidenceLink ?? oldVendor?.agreementEvidenceLink ?? "",
     proof_notes: input.proofNotes ?? oldVendor?.proofNotes ?? "",
     review_status: input.reviewStatus ?? oldVendor?.reviewStatus ?? "queued",
     reviewed_by: input.reviewedBy ?? oldVendor?.reviewedBy ?? "",
@@ -187,6 +204,8 @@ function upsertVendorStatus(input, actor = "unknown", source = "manual") {
         udyam_verified_by, udyam_verified_at, udyam_remarks,
         action_status, excluded_reason, evidence_url, proof_notes, review_status,
         reviewed_by, reviewed_at, review_comment, source_import_run_id, last_import_run_id,
+        verification_source, evidence_link, evidence_document_type, approved_by, approved_at,
+        written_agreement_default, agreement_credit_days, agreement_evidence_link,
         created_by, created_at, updated_at
       ) VALUES (
         @id, @vendor_name, @normalized_vendor_name, @is_msme, @udyam_number, @enterprise_type, @pan_number, @agreed_payment_days,
@@ -195,6 +214,8 @@ function upsertVendorStatus(input, actor = "unknown", source = "manual") {
         @udyam_verified_by, @udyam_verified_at, @udyam_remarks,
         @action_status, @excluded_reason, @evidence_url, @proof_notes, @review_status,
         @reviewed_by, @reviewed_at, @review_comment, @source_import_run_id, @last_import_run_id,
+        @verification_source, @evidence_link, @evidence_document_type, @approved_by, @approved_at,
+        @written_agreement_default, @agreement_credit_days, @agreement_evidence_link,
         @created_by, @created_at, @updated_at
       )
       ON CONFLICT(normalized_vendor_name) DO UPDATE SET
@@ -224,6 +245,14 @@ function upsertVendorStatus(input, actor = "unknown", source = "manual") {
         reviewed_by = excluded.reviewed_by,
         reviewed_at = excluded.reviewed_at,
         review_comment = excluded.review_comment,
+        verification_source = excluded.verification_source,
+        evidence_link = excluded.evidence_link,
+        evidence_document_type = excluded.evidence_document_type,
+        approved_by = excluded.approved_by,
+        approved_at = excluded.approved_at,
+        written_agreement_default = excluded.written_agreement_default,
+        agreement_credit_days = excluded.agreement_credit_days,
+        agreement_evidence_link = excluded.agreement_evidence_link,
         source_import_run_id = COALESCE(NULLIF(vendor_master.source_import_run_id, ''), excluded.source_import_run_id),
         last_import_run_id = excluded.last_import_run_id,
         updated_at = excluded.updated_at
@@ -272,6 +301,14 @@ function updateVendorById(id, patch, actor = "unknown", source = "manual") {
       actionStatus: patch.actionStatus ?? oldVendor.actionStatus,
       excludedReason: patch.excludedReason ?? oldVendor.excludedReason,
       evidenceUrl: patch.evidenceUrl ?? oldVendor.evidenceUrl,
+      verificationSource: patch.verificationSource ?? oldVendor.verificationSource,
+      evidenceLink: patch.evidenceLink ?? oldVendor.evidenceLink,
+      evidenceDocumentType: patch.evidenceDocumentType ?? oldVendor.evidenceDocumentType,
+      approvedBy: patch.approvedBy ?? oldVendor.approvedBy,
+      approvedAt: patch.approvedAt ?? oldVendor.approvedAt,
+      writtenAgreementDefault: patch.writtenAgreementDefault ?? oldVendor.writtenAgreementDefault,
+      agreementCreditDays: patch.agreementCreditDays ?? oldVendor.agreementCreditDays,
+      agreementEvidenceLink: patch.agreementEvidenceLink ?? oldVendor.agreementEvidenceLink,
       proofNotes: patch.proofNotes ?? oldVendor.proofNotes,
       reviewStatus: patch.reviewStatus ?? oldVendor.reviewStatus,
       reviewedBy: patch.reviewedBy ?? oldVendor.reviewedBy,
@@ -524,6 +561,18 @@ function importedVendorName(row) {
   return importedField(row, ["vendorName", "Vendor Name", "vendor", "name", "party", "supplierName", "Supplier Name"]);
 }
 
+function importedPanNumber(row) {
+  return String(importedField(row, [
+    "panNumber",
+    "PAN",
+    "PAN no",
+    "PAN no ",
+    "pan",
+    "panNo",
+    "panNumber",
+  ])).trim().toUpperCase();
+}
+
 function importedPaymentTerms(row) {
   const value = String(importedField(row, [
     "paymentTerms",
@@ -621,46 +670,127 @@ async function importUdyamRowsWithVerification(rows, actor = "unknown", options 
     }
 
     onEvent({ type: "format_validated", rowNumber, vendorName, udyamNumber, paymentTerms: agreedPaymentDays, message: `Format valid. Payment terms: ${agreedPaymentDays} days.` });
-    onEvent({ type: "portal_opening", rowNumber, vendorName, udyamNumber, message: "Opening Udyam verification portal." });
-    onEvent({ type: "udyam_submitted", rowNumber, vendorName, udyamNumber, message: "Submitting Udyam number for verification." });
-    const verification = await verifier(udyamNumber, { retries: options.retries ?? 1 });
-    const verified = Boolean(verification.verified);
-    const reviewMessage = verification.error || "Udyam verification requires manual review.";
+    onEvent({ type: "portal_fetch_started", rowNumber, vendorName, udyamNumber, source: "live_portal", message: "Fetching MSME details from live Udyam portal." });
+    onEvent({ type: "portal_opening", rowNumber, vendorName, udyamNumber, source: "live_portal", message: "Opening Udyam verification portal." });
+    onEvent({ type: "udyam_submitted", rowNumber, vendorName, udyamNumber, source: "live_portal", message: "Submitting Udyam number for live portal verification." });
+    let verification = await verifier(udyamNumber, { retries: options.retries ?? 1 });
+    let verified = Boolean(verification.verified);
+    let verificationSource = verified ? "live_portal" : "manual_review";
+    let resultSourceLabel = verified ? "Live portal verified" : "Manual review required";
+    let fallbackMatch = null;
+    let reviewMessage = verification.error || "Udyam verification requires manual review.";
     onEvent({
-      type: verified ? "portal_result_verified" : "manual_review_required",
+      type: verified ? "live_portal_verified" : "live_portal_unavailable",
       rowNumber,
       vendorName,
       udyamNumber,
+      source: "live_portal",
       status: verification.verificationStatus || (verified ? "verified" : "manual_fallback_required"),
-      message: verified ? "Udyam portal verified this vendor." : reviewMessage,
+      message: verified ? "Data fetched and verified from live Udyam portal." : `Live portal did not verify this row: ${reviewMessage}`,
     });
+    if (verified) {
+      onEvent({
+        type: "portal_result_verified",
+        rowNumber,
+        vendorName,
+        udyamNumber,
+        source: "live_portal",
+        status: "verified",
+        message: "Data fetched and verified from live Udyam portal.",
+      });
+    }
+
+    if (!verified) {
+      const fallbackStats = udyamFallbackService.stats();
+      onEvent({
+        type: "fallback_lookup_started",
+        rowNumber,
+        vendorName,
+        udyamNumber,
+        source: "fallback_upload",
+        message: `Live portal failed; checking fallback data at ${fallbackStats.rootDir}.`,
+      });
+      fallbackMatch = udyamFallbackService.findFallback({
+        vendorName,
+        udyamNumber,
+        panNumber: importedPanNumber(row),
+      });
+      if (fallbackMatch) {
+        verified = true;
+        verificationSource = "fallback_upload";
+        resultSourceLabel = "Fallback data used";
+        reviewMessage = `Live portal failed (${reviewMessage}); matched fallback by ${fallbackMatch.matchedBy}.`;
+        verification = {
+          ...verification,
+          verified: true,
+          verificationStatus: "verified",
+          udyamNumber: fallbackMatch.udyamNumber || udyamNumber,
+          enterpriseName: fallbackMatch.enterpriseName || fallbackMatch.vendorName || vendorName,
+          enterpriseType: fallbackMatch.enterpriseType || row.enterpriseType || "Micro",
+          registrationValidity: fallbackMatch.registrationValidity,
+          registrationDate: fallbackMatch.registrationDate,
+          verifiedAt: nowIso(),
+          fallbackMatched: true,
+          fallbackMatchedBy: fallbackMatch.matchedBy,
+          fallbackSourceWorkbook: fallbackMatch.sourceWorkbook,
+          fallbackSourceSheet: fallbackMatch.sourceSheet,
+          fallbackEvidencePath: fallbackMatch.evidencePath,
+          fallbackRootDir: fallbackMatch.fallbackRootDir,
+          error: "",
+        };
+        onEvent({
+          type: "fallback_matched",
+          rowNumber,
+          vendorName,
+          udyamNumber: verification.udyamNumber,
+          source: "fallback_upload",
+          status: "verified",
+          message: `Fallback data matched by ${fallbackMatch.matchedBy}; vendor marked verified from backend fallback data.`,
+        });
+      } else {
+        onEvent({
+          type: "fallback_not_found",
+          rowNumber,
+          vendorName,
+          udyamNumber,
+          source: "manual_review",
+          status: "manual_fallback_required",
+          message: "No fallback MSME record found; row needs manual review.",
+        });
+      }
+    }
+
     const vendor = upsertVendorStatus(
       {
         vendorName,
-        isMSME: verified || true,
+        isMSME: verified,
         udyamNumber: verification.udyamNumber || udyamNumber,
-        agreedPaymentDays,
+        agreedPaymentDays: fallbackMatch?.agreedPaymentDays || agreedPaymentDays,
+        panNumber: fallbackMatch?.panNumber || importedPanNumber(row),
         enterpriseType: verification.enterpriseType || row.enterpriseType || "Micro",
         enterpriseName: verification.enterpriseName || row.enterpriseName || "",
         verificationStatus: verified ? "verified" : verification.verificationStatus || "manual_fallback_required",
         udyamStatus: verified ? "verified" : verification.verificationStatus || "manual_fallback_required",
         actionStatus: verified ? "verified_msme" : "manual_review",
         reviewStatus: verified ? "approved" : "manual_review",
-        evidenceUrl: row.evidenceUrl || row.proofUrl || verification.screenshotPath || "",
-        udyamProofFileUrl: row.evidenceUrl || row.proofUrl || verification.screenshotPath || "",
-        udyamProofUploadedAt: (row.evidenceUrl || row.proofUrl || verification.screenshotPath) ? nowIso() : "",
-        proofNotes: withImportNote(row, verified ? "Verified through Udyam portal import." : reviewMessage, sourceFileName),
-        udyamRemarks: verified ? "" : withImportNote(row, reviewMessage, sourceFileName),
+        evidenceUrl: row.evidenceUrl || row.proofUrl || verification.fallbackEvidencePath || verification.screenshotPath || "",
+        udyamProofFileUrl: row.evidenceUrl || row.proofUrl || verification.fallbackEvidencePath || verification.screenshotPath || "",
+        udyamProofUploadedAt: (row.evidenceUrl || row.proofUrl || verification.fallbackEvidencePath || verification.screenshotPath) ? nowIso() : "",
+        proofNotes: withImportNote(row, verified ? resultSourceLabel : reviewMessage, sourceFileName),
+        udyamRemarks: verified ? resultSourceLabel : withImportNote(row, reviewMessage, sourceFileName),
         registrationValidity: verification.registrationValidity || "",
         registrationDate: verification.registrationDate || "",
         verifiedAt: verification.verifiedAt || (verified ? nowIso() : ""),
         lastVerifiedAt: nowIso(),
         udyamVerifiedBy: verified ? actor : "",
         udyamVerifiedAt: verified ? nowIso() : "",
+        verificationSource,
+        evidenceLink: verification.fallbackEvidencePath || row.evidenceUrl || row.proofUrl || verification.screenshotPath || "",
+        evidenceDocumentType: verification.fallbackEvidencePath ? "fallback_msme_evidence" : "",
         reviewComment: existing ? "" : "Imported Udyam row did not match an existing Tally creditor exactly.",
       },
       actor,
-      "udyam_excel_import"
+      verificationSource
     );
     recordVerificationAttempt({
       vendorId: vendor.id,
@@ -675,9 +805,17 @@ async function importUdyamRowsWithVerification(rows, actor = "unknown", options 
       status: verified ? (existing ? "verified" : "verified_unmatched") : (existing ? "manual_review" : "unmatched_manual_review"),
       vendor,
       verification,
+      verificationSource,
       row,
     });
-    onEvent({ type: "row_completed", rowNumber, vendorName, status: verified ? "verified" : "manual_review", message: `Row ${rowNumber} completed.` });
+    onEvent({
+      type: "row_completed",
+      rowNumber,
+      vendorName,
+      status: verified ? "verified" : "manual_review",
+      source: verificationSource,
+      message: verified ? `Row ${rowNumber} completed: ${resultSourceLabel}.` : `Row ${rowNumber} completed: manual review required.`,
+    });
   }
 
   const summary = {
@@ -685,6 +823,8 @@ async function importUdyamRowsWithVerification(rows, actor = "unknown", options 
     matched: results.filter((row) => ["verified", "manual_review"].includes(row.status)).length,
     unmatched: results.filter((row) => ["verified_unmatched", "unmatched_manual_review"].includes(row.status)).length,
     verified: results.filter((row) => ["verified", "verified_unmatched"].includes(row.status)).length,
+    livePortalVerified: results.filter((row) => row.verificationSource === "live_portal").length,
+    fallbackVerified: results.filter((row) => row.verificationSource === "fallback_upload").length,
     manualReview: results.filter((row) => ["manual_review", "unmatched_manual_review"].includes(row.status)).length,
     failed: results.filter((row) => row.status === "failed").length,
     results,

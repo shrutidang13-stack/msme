@@ -1,5 +1,8 @@
 const http = require("http");
 const { execFile } = require("child_process");
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 const { XMLParser } = require("fast-xml-parser");
 const env = require("../config/env");
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
@@ -41,6 +44,47 @@ function logTallyRequestBody(method, host, port, body) {
 
 function logImportStage(stage, details = {}) {
   console.log(`[tally-import] stage=${stage} ${JSON.stringify(details)}`);
+}
+
+function tallyDiagnosticsDir() {
+  return process.env.TALLY_DIAGNOSTICS_DIR || path.join(__dirname, "..", "storage", "tally-diagnostics");
+}
+
+function safeDiagnosticPart(value) {
+  return cleanName(value)
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "unknown";
+}
+
+function writeTallyXmlDiagnostic({ methodName, direction, xml, from, to, companyName, reason }) {
+  if (!xml) return null;
+  const hash = crypto.createHash("sha256").update(xml).digest("hex").slice(0, 12);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const filename = [
+    timestamp,
+    safeDiagnosticPart(methodName),
+    safeDiagnosticPart(direction),
+    from && to ? `${safeDiagnosticPart(from)}-${safeDiagnosticPart(to)}` : "",
+    hash,
+  ].filter(Boolean).join("_") + ".xml";
+  const dir = tallyDiagnosticsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, filename);
+  fs.writeFileSync(filePath, xml, "utf8");
+  logImportStage("diagnostics", {
+    status: "xml_dumped",
+    methodName,
+    direction,
+    path: filePath,
+    hash,
+    responseSize: Buffer.byteLength(xml, "utf8"),
+    from: from || null,
+    to: to || null,
+    companyName: companyName || null,
+    reason: reason || "",
+  });
+  return { path: filePath, hash };
 }
 
 function lineError(xml) {
@@ -144,19 +188,28 @@ function parseTallyProcessList(output) {
 function detectTallyProcesses() {
   return new Promise((resolve) => {
     if (process.platform !== "win32") return resolve([]);
-    execFile("tasklist", ["/FI", "IMAGENAME eq TallyPrime.exe"], { timeout: 3000 }, (error, stdout) => {
-      if (error) {
-        logImportStage("processDiagnostics", { status: "failed", error: error.message });
-        return resolve([]);
-      }
-      const processes = parseTallyProcessList(stdout);
-      if (processes.length > 1) {
-        logImportStage("processDiagnostics", { status: "multiple_tally_processes", count: processes.length, processes });
-      } else {
-        logImportStage("processDiagnostics", { status: "ok", count: processes.length });
-      }
-      resolve(processes);
-    });
+    const handleProcessDiagnosticError = (error) => {
+      logImportStage("processDiagnostics", {
+        status: "unavailable",
+        reason: "Windows process listing is blocked; continuing with XML health checks.",
+        error: error.message,
+      });
+      resolve([]);
+    };
+    try {
+      execFile("tasklist", ["/FI", "IMAGENAME eq TallyPrime.exe"], { timeout: 3000 }, (error, stdout) => {
+        if (error) return handleProcessDiagnosticError(error);
+        const processes = parseTallyProcessList(stdout);
+        if (processes.length > 1) {
+          logImportStage("processDiagnostics", { status: "multiple_tally_processes", count: processes.length, processes });
+        } else {
+          logImportStage("processDiagnostics", { status: "ok", count: processes.length });
+        }
+        resolve(processes);
+      });
+    } catch (error) {
+      handleProcessDiagnosticError(error);
+    }
   });
 }
 
@@ -168,8 +221,25 @@ function parseXml(xml, context) {
   }
 }
 
+function isVoucherObject(value) {
+  return Boolean(value && typeof value === "object" && (
+    Object.prototype.hasOwnProperty.call(value, "DATE") ||
+    Object.prototype.hasOwnProperty.call(value, "VOUCHERTYPENAME") ||
+    Object.prototype.hasOwnProperty.call(value, "VOUCHERNUMBER") ||
+    Object.prototype.hasOwnProperty.call(value, "ALLLEDGERENTRIES.LIST") ||
+    Object.prototype.hasOwnProperty.call(value, "@_VCHTYPE")
+  ));
+}
+
+function collectVoucherObjects(parsed) {
+  return collectByKey(parsed, "VOUCHER").filter(isVoucherObject);
+}
+
 function countKeys(parsed, keys) {
-  return keys.reduce((sum, key) => sum + collectByKey(parsed, key).length, 0);
+  return keys.reduce((sum, key) => {
+    if (key === "VOUCHER") return sum + collectVoucherObjects(parsed).length;
+    return sum + collectByKey(parsed, key).length;
+  }, 0);
 }
 
 function validateStandardExportXml(xml, context, rowKeys = []) {
@@ -184,7 +254,8 @@ function validateStandardExportXml(xml, context, rowKeys = []) {
   const rowCount = countKeys(parsed, rowKeys);
   const hasCmpInfo = collectByKey(parsed, "CMPINFO").length > 0;
   const hasEmptyCollection = /<COLLECTION>\s*<\/COLLECTION>/i.test(xml || "");
-  const cmpInfoOnly = hasCmpInfo && (hasEmptyCollection || rowCount === 0);
+  const voucherCounterOnly = rowKeys.includes("VOUCHER") && /<VOUCHER>\s*\d+\s*<\/VOUCHER>/i.test(xml || "") && rowCount === 0;
+  const cmpInfoOnly = hasCmpInfo && (hasEmptyCollection || rowCount === 0 || voucherCounterOnly);
   const emptyCollectionOnly = hasEmptyCollection && rowCount === 0;
   if (cmpInfoOnly || emptyCollectionOnly) {
     throw new Error(`${context} returned only metadata and no export rows. The XML export definition was not executed by Tally.`);
@@ -236,6 +307,14 @@ function normalizeCompanyName(name) {
 
 function formatDate(raw) {
   const value = text(raw);
+  const displayMatch = value.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$/);
+  if (displayMatch) {
+    const months = { jan: "01", feb: "02", mar: "03", apr: "04", may: "05", jun: "06", jul: "07", aug: "08", sep: "09", oct: "10", nov: "11", dec: "12" };
+    const yearNumber = Number(displayMatch[3]);
+    const fullYear = displayMatch[3].length === 2 ? (yearNumber >= 70 ? 1900 + yearNumber : 2000 + yearNumber) : yearNumber;
+    const month = months[displayMatch[2].toLowerCase()];
+    if (month) return `${fullYear}-${month}-${String(Number(displayMatch[1])).padStart(2, "0")}`;
+  }
   if (!value || value.length !== 8) return value;
   return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
 }
@@ -334,6 +413,10 @@ function buildLedgerCollectionXML(companyName) {
   return buildExportXml("List of Accounts", staticVariablesXml(companyName));
 }
 
+function buildCompanyContextProbeXML(companyName) {
+  return `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Company Context Probe</ID></HEADER><BODY><DESC>${staticVariablesXml(companyName)}<TDL><TDLMESSAGE><COLLECTION NAME="MSME Company Context Probe" ISMODIFY="No"><TYPE>Company</TYPE><FETCH>Name,FormalName,Guid</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+}
+
 function buildLedgerMasterCollectionXML(companyName) {
   return `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Ledger Master Collection</ID></HEADER><BODY><DESC>${staticVariablesXml(companyName)}<TDL><TDLMESSAGE><COLLECTION NAME="MSME Ledger Master Collection" ISMODIFY="No"><TYPE>Ledger</TYPE><FETCH>Name,Parent,OpeningBalance,ClosingBalance,IsBillWiseOn,Guid,GSTIN,GSTRegistrationNumber,GSTRegnNo,IncomeTaxNumber,MailingName,Email,LedgerPhone,LedgerMobile,Address.*,Name.*,LanguageName.*,Narration,Description,Notes,UDF:*</FETCH></COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
 }
@@ -358,19 +441,20 @@ function buildVoucherCollectionXML(from, to, companyName) {
   return buildDayBookXML(from, to, companyName);
 }
 
-function buildVoucherObjectCollectionXML(from, to, companyName) {
+function buildVoucherObjectCollectionXML(from, to, companyName, options = {}) {
+  const includeDateFilter = options.includeDateFilter !== false;
   const fromLiteral = formatTallyDateLiteral(from);
   const toLiteral = formatTallyDateLiteral(to);
-  const dateFilter = fromLiteral && toLiteral
+  const dateFilter = includeDateFilter && fromLiteral && toLiteral
     ? `<FILTERS>MSMEVoucherDateFilter</FILTERS>`
     : "";
-  const dateFilterFormula = fromLiteral && toLiteral
+  const dateFilterFormula = includeDateFilter && fromLiteral && toLiteral
     ? `<SYSTEM TYPE="Formulae" NAME="MSMEVoucherDateFilter">$Date &gt;= $$Date:"${fromLiteral}" AND $Date &lt;= $$Date:"${toLiteral}"</SYSTEM>`
     : "";
   return `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>MSME Voucher Collection</ID></HEADER><BODY><DESC>${staticVariablesXml(companyName, [
     `<SVFROMDATE>${from}</SVFROMDATE>`,
     `<SVTODATE>${to}</SVTODATE>`,
-  ])}<TDL><TDLMESSAGE><COLLECTION NAME="MSME Voucher Collection" ISMODIFY="No"><TYPE>Voucher</TYPE>${dateFilter}<FETCH>Date,VoucherNumber,VoucherTypeName,PartyLedgerName,PartyName,Reference,AllLedgerEntries.*,LedgerEntries.*,BillAllocations.*</FETCH></COLLECTION>${dateFilterFormula}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+  ])}<TDL><TDLMESSAGE><COLLECTION NAME="MSME Voucher Collection" ISMODIFY="No"><TYPE>Voucher</TYPE>${dateFilter}<FETCH>Date,VoucherNumber,VoucherTypeName,PartyLedgerName,PartyName,Reference,LedgerName,AllLedgerEntries.*,LedgerEntries.*,BillAllocations.*,InventoryEntries.*,Guid,MasterID,AlterID,Amount</FETCH></COLLECTION>${dateFilterFormula}</TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
 }
 
 function buildLoadedCompanyCollectionXML() {
@@ -525,13 +609,14 @@ async function tallyRequestWithCompanyVariants(buildXml, companyName, options = 
       attemptedSVCURRENTCOMPANY: variant,
       normalizedAttempt: normalizeCompanyName(variant),
     });
-    const xml = await tallyRequest(buildXml(variant), options);
+    const requestXml = buildXml(variant);
+    const xml = await tallyRequest(requestXml, options);
     lastXml = xml;
     const tallyLineError = lineError(xml);
-    if (!cannotSetCompanyContext(tallyLineError)) return { xml, companyName: variant, lineError: tallyLineError };
+    if (!cannotSetCompanyContext(tallyLineError)) return { xml, requestXml, companyName: variant, lineError: tallyLineError };
     lastLineError = tallyLineError;
   }
-  return { xml: lastXml, companyName: variants[variants.length - 1] || cleanName(companyName), lineError: lastLineError };
+  return { xml: lastXml, requestXml: "", companyName: variants[variants.length - 1] || cleanName(companyName), lineError: lastLineError };
 }
 
 function isCreditorGroupName(name) {
@@ -894,7 +979,7 @@ function findParticulars(voucher, ledgerName) {
 
 function parseLedgerVouchers(xml, ledgerName) {
   const parsed = parseXml(xml, `Ledger Vouchers for ${ledgerName}`);
-  const vouchers = collectByKey(parsed, "VOUCHER");
+  const vouchers = collectVoucherObjects(parsed);
   const rows = [];
   for (const voucher of vouchers) {
     const date = formatDate(voucher.DATE || firstText(voucher, ["DATE"]));
@@ -925,12 +1010,56 @@ function parseLedgerVouchers(xml, ledgerName) {
       raw: voucher,
     });
   }
+  if (rows.length === 0) rows.push(...parseDisplayLedgerVoucherRows(parsed, ledgerName));
+  return rows;
+}
+
+function parseDisplayLedgerVoucherRows(parsed, ledgerName) {
+  const dates = collectByKey(parsed, "DSPVCHDATE").map(text);
+  const accounts = collectByKey(parsed, "DSPVCHLEDACCOUNT").map(cleanName);
+  const types = collectByKey(parsed, "DSPVCHTYPE").map(cleanName);
+  const debitAmounts = collectByKey(parsed, "DSPVCHDRAMT").map(parseAmount);
+  const creditAmounts = collectByKey(parsed, "DSPVCHCRAMT").map(parseAmount);
+  const rows = [];
+  let lastDate = "";
+  const rowCount = Math.max(dates.length, accounts.length, types.length, debitAmounts.length, creditAmounts.length);
+  for (let index = 0; index < rowCount; index += 1) {
+    const date = formatDate(dates[index] || lastDate);
+    if (date) lastDate = date;
+    const debit = Math.round(Math.abs(Number(debitAmounts[index] || 0)) * 100) / 100;
+    const credit = Math.round(Math.abs(Number(creditAmounts[index] || 0)) * 100) / 100;
+    const amount = Math.max(debit, credit);
+    if (!date || !amount) continue;
+    rows.push({
+      vendorName: ledgerName,
+      normalizedVendorName: normalizeVendorName(ledgerName),
+      ledgerName,
+      normalizedLedgerName: normalizeVendorName(ledgerName),
+      date,
+      particulars: accounts[index] || "",
+      voucherType: types[index] || "",
+      voucherNumber: "",
+      debit,
+      credit,
+      amount,
+      billReference: "",
+      pendingAmount: 0,
+      raw: {
+        displayRow: true,
+        DSPVCHDATE: dates[index] || "",
+        DSPVCHLEDACCOUNT: accounts[index] || "",
+        DSPVCHTYPE: types[index] || "",
+        DSPVCHDRAMT: debitAmounts[index] || 0,
+        DSPVCHCRAMT: creditAmounts[index] || 0,
+      },
+    });
+  }
   return rows;
 }
 
 function parseVoucherCollection(xml, creditorNames = null) {
   const parsed = parseXml(xml, "Voucher Collection");
-  const vouchers = collectByKey(parsed, "VOUCHER");
+  const vouchers = collectVoucherObjects(parsed);
   const creditorSet = Array.isArray(creditorNames) ? new Set(creditorNames.map(normalizeVendorName)) : null;
   const rows = [];
 
@@ -1007,7 +1136,7 @@ function parseVoucherCollection(xml, creditorNames = null) {
 
 function parseVouchers(xml, filterType) {
   const parsed = parseXml(xml, "Day Book");
-  const vouchers = collectByKey(parsed, "VOUCHER");
+  const vouchers = collectVoucherObjects(parsed);
   const rows = [];
   for (const voucher of vouchers) {
     const vchType = text(voucher["@_VCHTYPE"]);
@@ -1348,7 +1477,7 @@ async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, company
     from: batch.from,
     to: batch.to,
   });
-  const { xml } = await tallyRequestWithCompanyVariants(
+  const { xml, requestXml, companyName: selectedCompany } = await tallyRequestWithCompanyVariants(
     (selectedCompany) => buildVoucherObjectCollectionXML(batch.from, batch.to, selectedCompany),
     companyName,
     { timeoutMs: voucherTimeoutMs() }
@@ -1357,9 +1486,98 @@ async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, company
   if (tallyLineError) throw new Error(tallyLineError);
   const parsed = parseXml(xml, `Voucher Collection fallback ${batch.label}`);
   const exportedVoucherCount = countKeys(parsed, ["VOUCHER"]);
-  const rows = parseVoucherCollection(xml, creditorNames)
+  const hasCmpInfo = collectByKey(parsed, "CMPINFO").length > 0;
+  const hasEmptyCollection = /<COLLECTION>\s*<\/COLLECTION>/i.test(xml || "");
+  const metadataOnly = exportedVoucherCount === 0 && (hasCmpInfo || hasEmptyCollection || /<VOUCHER>\s*\d+\s*<\/VOUCHER>/i.test(xml || ""));
+  let rows = parseVoucherCollection(xml, creditorNames)
     .filter((row) => dateInTallyRange(row.date, batch.from, batch.to))
     .map((row) => ({ ...row, voucherSource: "Voucher Collection" }));
+  let effectiveXml = xml;
+  let effectiveRequestXml = requestXml;
+  let effectiveSelectedCompany = selectedCompany;
+  let effectiveExportedVoucherCount = exportedVoucherCount;
+  let localDateFilterConfirmedEmpty = false;
+
+  if (rows.length === 0 && metadataOnly && env.tallyAllowUnfilteredVoucherRetry) {
+    logImportStage("vouchersExport", {
+      status: "unfiltered_collection_retry_start",
+      mode,
+      label: batch.label,
+      from: batch.from,
+      to: batch.to,
+      reason: "Filtered Voucher Collection returned metadata only; retrying without Tally-side date filter.",
+    });
+    const retry = await tallyRequestWithCompanyVariants(
+      (selectedCompany) => buildVoucherObjectCollectionXML(batch.from, batch.to, selectedCompany, { includeDateFilter: false }),
+      selectedCompany || companyName,
+      { timeoutMs: voucherTimeoutMs() }
+    );
+    const retryLineError = lineError(retry.xml);
+    if (retryLineError) throw new Error(retryLineError);
+    const retryParsed = parseXml(retry.xml, `Voucher Collection unfiltered retry ${batch.label}`);
+    const retryExportedVoucherCount = countKeys(retryParsed, ["VOUCHER"]);
+    const retryRows = parseVoucherCollection(retry.xml, creditorNames);
+    rows = retryRows
+      .filter((row) => dateInTallyRange(row.date, batch.from, batch.to))
+      .map((row) => ({ ...row, voucherSource: "Voucher Collection" }));
+    effectiveXml = retry.xml;
+    effectiveRequestXml = retry.requestXml;
+    effectiveSelectedCompany = retry.companyName;
+    effectiveExportedVoucherCount = retryExportedVoucherCount;
+    localDateFilterConfirmedEmpty = retryExportedVoucherCount > 0 && rows.length === 0;
+    logImportStage("vouchersExport", {
+      status: "unfiltered_collection_retry_end",
+      mode,
+      label: batch.label,
+      from: batch.from,
+      to: batch.to,
+      exportedVoucherCount: retryExportedVoucherCount,
+      parsedVoucherCount: retryRows.length,
+      localDateFilteredCount: rows.length,
+      localDateFilterConfirmedEmpty,
+    });
+  } else if (rows.length === 0 && metadataOnly) {
+    logImportStage("vouchersExport", {
+      status: "unfiltered_collection_retry_skipped",
+      mode,
+      label: batch.label,
+      from: batch.from,
+      to: batch.to,
+      reason: "Filtered Voucher Collection returned metadata only; skipped unfiltered retry to avoid large Tally XML timeout.",
+    });
+  }
+  let failureReason = "";
+  let requestDiagnostic = null;
+  let responseDiagnostic = null;
+  if (rows.length === 0) {
+    failureReason = localDateFilterConfirmedEmpty
+      ? ""
+      : metadataOnly
+      ? "Voucher Collection returned only metadata and no voucher rows."
+      : effectiveExportedVoucherCount === 0
+        ? "Voucher Collection returned no voucher nodes."
+        : "Voucher Collection returned vouchers, but no rows matched creditor/date filters.";
+    if (failureReason) {
+      requestDiagnostic = writeTallyXmlDiagnostic({
+        methodName: "Voucher Collection",
+        direction: "request",
+        xml: effectiveRequestXml,
+        from: batch.from,
+        to: batch.to,
+        companyName: effectiveSelectedCompany || companyName,
+        reason: failureReason,
+      });
+      responseDiagnostic = writeTallyXmlDiagnostic({
+        methodName: "Voucher Collection",
+        direction: "response",
+        xml: effectiveXml,
+        from: batch.from,
+        to: batch.to,
+        companyName: effectiveSelectedCompany || companyName,
+        reason: failureReason,
+      });
+    }
+  }
   const maxRows = maxVoucherRowsPerBatch();
   const limitedRows = rows.slice(0, maxRows);
   logImportStage("vouchersExport", {
@@ -1370,18 +1588,30 @@ async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, company
     label: batch.label,
     from: batch.from,
     to: batch.to,
-    responseSize: Buffer.byteLength(xml, "utf8"),
+    responseSize: Buffer.byteLength(effectiveXml, "utf8"),
     elapsedMs: Date.now() - startedAt,
-    exportedVoucherCount,
+    exportedVoucherCount: effectiveExportedVoucherCount,
     parsedVoucherCount: rows.length,
     voucherCount: limitedRows.length,
     truncated: rows.length > maxRows,
+    failureReason: failureReason || undefined,
+    requestDiagnosticPath: requestDiagnostic?.path,
+    responseDiagnosticPath: responseDiagnostic?.path,
   });
   return {
     rows: limitedRows,
     source: "Voucher Collection",
     fallbackUsed,
-    warning: rows.length > maxRows
+    warning: failureReason
+      ? {
+          ledgerName: "ALL",
+          message: failureReason,
+          severity: "warning",
+          methodName: "Voucher Collection",
+          requestPath: requestDiagnostic?.path,
+          responsePath: responseDiagnostic?.path,
+        }
+      : rows.length > maxRows
       ? { ledgerName: "ALL", message: `Voucher collection batch ${batch.label} exceeded ${maxRows} rows and was truncated to prevent huge exports.` }
       : null,
   };
@@ -1389,21 +1619,6 @@ async function fetchVoucherObjectCollectionBatch({ batch, creditorNames, company
 
 async function fetchVoucherBatch({ batch, creditorNames, companyName, mode = "quarter" }) {
   const startedAt = Date.now();
-  try {
-    return await fetchVoucherObjectCollectionBatch({ batch, creditorNames, companyName, mode, fallbackUsed: false });
-  } catch (collectionError) {
-    logImportStage("vouchersExport", {
-      status: "primary_collection_failed",
-      primaryExportPath: "Voucher Collection",
-      fallbackExportPath: "Day Book",
-      mode,
-      label: batch.label,
-      from: batch.from,
-      to: batch.to,
-      error: collectionError.message,
-    });
-  }
-
   const xmlBody = buildVoucherCollectionXML(batch.from, batch.to, companyName);
   logImportStage("vouchersExport", {
     status: "batch_start",
@@ -1414,55 +1629,100 @@ async function fetchVoucherBatch({ batch, creditorNames, companyName, mode = "qu
     primaryExportPath: "Day Book",
     xmlSize: Buffer.byteLength(xmlBody, "utf8"),
   });
-  const { xml } = await tallyRequestWithCompanyVariants(
-    (selectedCompany) => buildVoucherCollectionXML(batch.from, batch.to, selectedCompany),
-    companyName,
-    { timeoutMs: voucherTimeoutMs() }
-  );
-  const tallyLineError = lineError(xml);
-  if (tallyLineError) throw new Error(tallyLineError);
-  const validated = validateStandardExportXml(xml, `Day Book voucher export ${batch.label}`, ["VOUCHER"]);
-  const rows = parseVoucherCollection(xml, creditorNames).map((row) => ({ ...row, voucherSource: "Day Book" }));
-  if (rows.length === 0) {
+  try {
+    const { xml, requestXml, companyName: selectedCompany } = await tallyRequestWithCompanyVariants(
+      (selectedCompany) => buildVoucherCollectionXML(batch.from, batch.to, selectedCompany),
+      companyName,
+      { timeoutMs: voucherTimeoutMs() }
+    );
+    const tallyLineError = lineError(xml);
+    if (tallyLineError) throw new Error(tallyLineError);
+    const validated = validateStandardExportXml(xml, `Day Book voucher export ${batch.label}`, ["VOUCHER"]);
+    const parsedRows = parseVoucherCollection(xml, creditorNames);
+    const outOfRangeRows = parsedRows.filter((row) => !dateInTallyRange(row.date, batch.from, batch.to)).length;
+    const rows = parsedRows
+      .filter((row) => dateInTallyRange(row.date, batch.from, batch.to))
+      .map((row) => ({ ...row, voucherSource: "Day Book" }));
+    if (rows.length === 0) {
+      const reason = validated.rowCount === 0
+        ? "Day Book returned no voucher nodes."
+        : outOfRangeRows > 0
+          ? `Day Book returned ${outOfRangeRows} voucher row(s), but all were outside ${batch.from}-${batch.to}.`
+          : "Day Book returned vouchers, but no rows matched creditor/date filters.";
+      const requestDiagnostic = writeTallyXmlDiagnostic({
+        methodName: "Day Book",
+        direction: "request",
+        xml: requestXml,
+        from: batch.from,
+        to: batch.to,
+        companyName: selectedCompany || companyName,
+        reason,
+      });
+      const responseDiagnostic = writeTallyXmlDiagnostic({
+        methodName: "Day Book",
+        direction: "response",
+        xml,
+        from: batch.from,
+        to: batch.to,
+        companyName: selectedCompany || companyName,
+        reason,
+      });
+      logImportStage("vouchersExport", {
+        status: "fallback_start",
+        reason,
+        primaryExportPath: "Day Book",
+        fallbackExportPath: "Voucher Collection",
+        mode,
+        label: batch.label,
+        from: batch.from,
+        to: batch.to,
+        exportedVoucherCount: validated.rowCount,
+        parsedVoucherCount: rows.length,
+        outOfRangeVoucherCount: outOfRangeRows,
+        requestDiagnosticPath: requestDiagnostic?.path,
+        responseDiagnosticPath: responseDiagnostic?.path,
+      });
+      return fetchVoucherObjectCollectionBatch({ batch, creditorNames, companyName, mode });
+    }
+    const maxRows = maxVoucherRowsPerBatch();
+    const limitedRows = rows.slice(0, maxRows);
+    const elapsedMs = Date.now() - startedAt;
     logImportStage("vouchersExport", {
-      status: "fallback_start",
-      reason: "Day Book returned no creditor voucher rows",
+      status: "batch_end",
+      mode,
+      label: batch.label,
+      from: batch.from,
+      to: batch.to,
+      primaryExportPath: "Day Book",
+      responseSize: Buffer.byteLength(xml, "utf8"),
+      elapsedMs,
+      exportedVoucherCount: validated.rowCount,
+      parsedVoucherCount: rows.length,
+      outOfRangeVoucherCount: outOfRangeRows,
+      voucherCount: limitedRows.length,
+      truncated: rows.length > maxRows,
+    });
+    return {
+      rows: limitedRows,
+      source: "Day Book",
+      fallbackUsed: false,
+      warning: rows.length > maxRows
+        ? { ledgerName: "ALL", message: `Voucher batch ${batch.label} exceeded ${maxRows} rows and was truncated to prevent huge exports.` }
+        : null,
+    };
+  } catch (dayBookError) {
+    logImportStage("vouchersExport", {
+      status: "primary_daybook_failed",
       primaryExportPath: "Day Book",
       fallbackExportPath: "Voucher Collection",
       mode,
       label: batch.label,
       from: batch.from,
       to: batch.to,
-      exportedVoucherCount: validated.rowCount,
-      parsedVoucherCount: rows.length,
+      error: dayBookError.message,
     });
     return fetchVoucherObjectCollectionBatch({ batch, creditorNames, companyName, mode });
   }
-  const maxRows = maxVoucherRowsPerBatch();
-  const limitedRows = rows.slice(0, maxRows);
-  const elapsedMs = Date.now() - startedAt;
-  logImportStage("vouchersExport", {
-    status: "batch_end",
-    mode,
-    label: batch.label,
-    from: batch.from,
-    to: batch.to,
-    primaryExportPath: "Day Book",
-    responseSize: Buffer.byteLength(xml, "utf8"),
-    elapsedMs,
-    exportedVoucherCount: validated.rowCount,
-    parsedVoucherCount: rows.length,
-    voucherCount: limitedRows.length,
-    truncated: rows.length > maxRows,
-  });
-  return {
-    rows: limitedRows,
-    source: "Day Book",
-    fallbackUsed: false,
-    warning: rows.length > maxRows
-      ? { ledgerName: "ALL", message: `Voucher batch ${batch.label} exceeded ${maxRows} rows and was truncated to prevent huge exports.` }
-      : null,
-  };
 }
 
 async function fetchAllCreditorLedgerVouchers({ creditors, from = "20250401", to = "20260331", companyName } = {}) {
@@ -1479,7 +1739,7 @@ async function fetchAllCreditorLedgerVouchers({ creditors, from = "20250401", to
     try {
       const result = await fetchVoucherBatch({ batch, creditorNames, companyName: company.companyName, mode: "quarter" });
       rows.push(...result.rows);
-      if (result.source) sourcesUsed.add(result.source);
+      if ((result.rows.length > 0 || result.fallbackUsed) && result.source) sourcesUsed.add(result.source);
       if (result.fallbackUsed) fallbackUsed = true;
       if (result.warning) warnings.push(result.warning);
     } catch (error) {
@@ -1492,7 +1752,7 @@ async function fetchAllCreditorLedgerVouchers({ creditors, from = "20250401", to
         try {
           const result = await fetchVoucherBatch({ batch: monthBatch, creditorNames, companyName: company.companyName, mode: "monthly_retry" });
           rows.push(...result.rows);
-          if (result.source) sourcesUsed.add(result.source);
+          if ((result.rows.length > 0 || result.fallbackUsed) && result.source) sourcesUsed.add(result.source);
           if (result.fallbackUsed) fallbackUsed = true;
           if (result.warning) warnings.push(result.warning);
         } catch (monthlyError) {
@@ -1505,18 +1765,50 @@ async function fetchAllCreditorLedgerVouchers({ creditors, from = "20250401", to
     }
   }
 
-  const mergedRows = dedupeVoucherRows(rows);
+  let mergedRows = dedupeVoucherRows(rows);
+  if (mergedRows.length === 0 && creditorNames.length > 0) {
+    const maxLedgerFallbackCreditors = Number(process.env.TALLY_LEDGER_FALLBACK_MAX_CREDITORS || 300);
+    const fallbackCreditors = creditorNames.slice(0, maxLedgerFallbackCreditors);
+    logImportStage("vouchersExport", {
+      status: "ledger_fallback_start",
+      primaryExportPath: "Voucher Collection",
+      fallbackExportPath: "Ledger Vouchers",
+      creditorCount: fallbackCreditors.length,
+      skippedCreditors: Math.max(creditorNames.length - fallbackCreditors.length, 0),
+      from,
+      to,
+      companyName: company.companyName,
+    });
+    for (const ledgerName of fallbackCreditors) {
+      try {
+        const ledgerRows = await fetchLedgerVouchers({ ledgerName, from, to, companyName: company.companyName });
+        rows.push(...ledgerRows.map((row) => ({ ...row, voucherSource: "Ledger Vouchers" })));
+      } catch (error) {
+        warnings.push({ ledgerName, message: `Ledger Vouchers fallback failed: ${error.message}` });
+      }
+    }
+    if (creditorNames.length > maxLedgerFallbackCreditors) {
+      warnings.push({
+        ledgerName: "ALL",
+        message: `Ledger Vouchers fallback was limited to ${maxLedgerFallbackCreditors} creditors. Increase TALLY_LEDGER_FALLBACK_MAX_CREDITORS if needed.`,
+        severity: "warning",
+      });
+    }
+    mergedRows = dedupeVoucherRows(rows);
+    if (mergedRows.length > 0) {
+      sourcesUsed.add("Ledger Vouchers");
+      fallbackUsed = true;
+    }
+    logImportStage("vouchersExport", {
+      status: "ledger_fallback_end",
+      exportedVoucherCount: rows.length,
+      dedupedVoucherCount: mergedRows.length,
+      warnings: warnings.length,
+    });
+  }
   const voucherSource = sourcesUsed.size > 1 ? [...sourcesUsed].join(" + ") : [...sourcesUsed][0] || "Day Book";
   if (quarterBatches.length > 0 && mergedRows.length === 0 && warnings.length >= quarterBatches.length) {
-    logImportStage("vouchersExport", { status: "failed", warnings });
-    throw new Error(`Could not fetch voucher rows for selected financial year: ${warnings[0]?.message || "Tally voucher export failed"}`);
-  }
-  if (fallbackUsed) {
-    warnings.push({
-      ledgerName: "ALL",
-      message: "Voucher Collection fallback was used because Day Book returned no creditor voucher rows for one or more batches.",
-      severity: "warning",
-    });
+    logImportStage("vouchersExport", { status: "empty", warnings });
   }
   logImportStage("vouchersExport", {
     status: "success",
@@ -1544,9 +1836,9 @@ async function fetchAllDayBookVouchers({ from = "20250401", to = "20260331", com
     try {
       const result = await fetchVoucherBatch({ batch, creditorNames: null, companyName: company.companyName, mode: "monthly_full_daybook" });
       rows.push(...result.rows);
-      if (result.source) sourcesUsed.add(result.source);
-      if (result.fallbackUsed) fallbackUsed = true;
-      if (result.warning) warnings.push(result.warning);
+      if (result.rows.length > 0 && result.source) sourcesUsed.add(result.source);
+      if (result.rows.length > 0 && result.fallbackUsed) fallbackUsed = true;
+      if (result.warning && result.rows.length > 0) warnings.push(result.warning);
     } catch (error) {
       warnings.push({ ledgerName: "ALL", message: `Day Book batch ${batch.label} failed: ${error.message}` });
     }
@@ -1555,8 +1847,7 @@ async function fetchAllDayBookVouchers({ from = "20250401", to = "20260331", com
   const mergedRows = dedupeVoucherRows(rows);
   const voucherSource = sourcesUsed.size > 1 ? [...sourcesUsed].join(" + ") : [...sourcesUsed][0] || "Day Book";
   if (monthBatches.length > 0 && mergedRows.length === 0 && warnings.length >= monthBatches.length) {
-    logImportStage("daybookExport", { status: "failed", warnings });
-    throw new Error(`Could not fetch full Day Book rows for selected period: ${warnings[0]?.message || "Tally Day Book export failed"}`);
+    logImportStage("daybookExport", { status: "empty", warnings });
   }
   logImportStage("daybookExport", {
     status: "success",
@@ -1607,6 +1898,19 @@ async function fetchLedgerMetadata({ companyName } = {}) {
     companyNames: company.companyNames,
     companyDetectionMethod: company.method,
     ledgers,
+  };
+}
+
+async function fetchLedgerSnapshot({ companyName, asOnDate } = {}) {
+  const metadata = await fetchLedgerMetadata({ companyName });
+  return {
+    ...metadata,
+    asOnDate: asOnDate || "",
+    ledgers: metadata.ledgers.map((ledger) => ({
+      ...ledger,
+      snapshotDate: asOnDate || "",
+      ledgerPayableOutstanding: Math.max(-Number(ledger.closingBalance || 0), 0),
+    })),
   };
 }
 
@@ -1677,10 +1981,14 @@ async function tallyHealth(options = {}) {
     pingResponse = await tallyStatusRequest({ timeoutMs: 5000 });
   } catch (error) {
     const errors = error.tallyErrors || [{ host: env.tallyHost, code: error.code || null, message: error.message }];
+    const timedOut = errors.some((item) => item.code === "ETIMEDOUT" || /timeout/i.test(item.message || ""));
+    const message = timedOut
+      ? "TallyPrime is open on port 9000 but is not responding. It may still be busy with a previous XML export; wait for it to finish or restart TallyPrime."
+      : "TallyPrime is not open or port 9000 is unreachable";
     logImportStage("ping", { status: "failed", errors });
     return {
       reachable: false,
-      portOpen: false,
+      portOpen: timedOut,
       serverRunning: false,
       xmlPostWorking: false,
       companyDetected: false,
@@ -1688,11 +1996,13 @@ async function tallyHealth(options = {}) {
       companyName: null,
       rawPingResponse: "",
       rawXmlResponsePreview: "",
-      error: "TallyPrime is not open or port 9000 is unreachable",
-      nextAction: "Open TallyPrime and enable the XML/HTTP server on port 9000.",
+      error: message,
+      nextAction: timedOut
+        ? "Wait for the running Tally export to finish. If it stays stuck, save work in TallyPrime and restart TallyPrime, then retry import."
+        : "Open TallyPrime and enable the XML/HTTP server on port 9000.",
       port: env.tallyPort,
-      message: "TallyPrime is not open or port 9000 is unreachable",
-      errors: ["Port 9000 unreachable", ...errors.map((item) => item.code || item.message).filter(Boolean)],
+      message,
+      errors: [timedOut ? "Tally HTTP timeout on port 9000" : "Port 9000 unreachable", ...errors.map((item) => item.code || item.message).filter(Boolean)],
     };
   }
 
@@ -1759,14 +2069,14 @@ async function tallyHealth(options = {}) {
   logImportStage("xmlPostTest", { status: "start" });
   try {
     const companyProbe = await tallyRequestWithCompanyVariants(
-      (selectedCompany) => buildLedgerCollectionXML(selectedCompany),
+      (selectedCompany) => buildCompanyContextProbeXML(selectedCompany),
       company.companyName,
-      { timeoutMs: 30000 }
+      { timeoutMs: 10000 }
     );
     exportProbeBody = companyProbe.xml;
     exportProbe = { body: companyProbe.xml };
-    const validated = validateStandardExportXml(exportProbeBody, "List of Accounts health probe", ["LEDGER", "GROUP", "DSPACCNAME"]);
-    logImportStage("xmlPostTest", { status: "success", reportName: "List of Accounts", parsedRows: validated.rowCount });
+    const validated = validateStandardExportXml(exportProbeBody, "Company context health probe", ["COMPANY"]);
+    logImportStage("xmlPostTest", { status: "success", reportName: "Company context probe", parsedRows: validated.rowCount });
   } catch (error) {
     logImportStage("xmlPostTest", { status: "failed", error: error.message });
     return {
@@ -1781,8 +2091,8 @@ async function tallyHealth(options = {}) {
       companyDetectionMethod: company.method,
       rawPingResponse,
       rawXmlResponsePreview: preview(exportProbeBody || exportProbe?.body || ""),
-      error: "Tally server is reachable, but XML export request failed.",
-      nextAction: "Restart TallyPrime or verify that XML export requests are allowed on port 9000.",
+      error: error.message || "Tally server is reachable, but XML export request failed.",
+      nextAction: "Restart TallyPrime or verify that XML export requests are allowed on port 9000. If this is a timeout, wait for the previous Tally export to finish and retry.",
       port: env.tallyPort,
       xmlServerResponding: false,
       message: "Tally server is reachable, but XML export request failed.",
@@ -1825,11 +2135,13 @@ module.exports = {
   fetchAllCreditorLedgerVouchers,
   fetchAllDayBookVouchers,
   fetchLedgerMetadata,
+  fetchLedgerSnapshot,
   buildPeriodBatches,
   buildMonthlyBatches,
   buildVoucherCollectionXML,
   buildVoucherObjectCollectionXML,
   buildLedgerCollectionXML,
+  buildCompanyContextProbeXML,
   buildLedgerMasterCollectionXML,
   buildLedgerVouchersXML,
   parseCompanyNames,

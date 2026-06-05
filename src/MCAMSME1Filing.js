@@ -4,10 +4,13 @@ import {
   fetchMcaMsme1Filings,
   fetchReports,
   generateMcaMsme1,
+  generateMcaMsme1Xml,
   mcaMsme1DownloadUrl,
+  mcaMsme1XmlDownloadUrl,
   previewMcaMsme1,
   recordMcaMsme1Srn,
   startMcaMsme1Upload,
+  uploadMcaMsme1Excel,
 } from "./services/api";
 
 const HALF_YEARS = [
@@ -34,6 +37,9 @@ export default function MCAMSME1Filing() {
   const [preview, setPreview] = useState(null);
   const [selectedFiling, setSelectedFiling] = useState(null);
   const [mcaUserId, setMcaUserId] = useState("");
+  const [companyDetails, setCompanyDetails] = useState({ cin: "", companyName: "" });
+  const [uploadedRows, setUploadedRows] = useState([]);
+  const [xmlGeneration, setXmlGeneration] = useState(null);
   const [srn, setSrn] = useState("");
   const [loading, setLoading] = useState("");
   const [message, setMessage] = useState("");
@@ -104,6 +110,67 @@ export default function MCAMSME1Filing() {
     }
   };
 
+  const fileToBase64 = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || "").split(",").pop());
+    reader.onerror = () => reject(reader.error || new Error("Unable to read file"));
+    reader.readAsDataURL(file);
+  });
+
+  const uploadExcel = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file || !reportId) return;
+    setLoading("upload-excel");
+    setError("");
+    setMessage("");
+    try {
+      const contentBase64 = await fileToBase64(file);
+      const response = await uploadMcaMsme1Excel({
+        reportId,
+        fileName: file.name,
+        contentBase64,
+        companyDetails,
+        fiscalYear: selectedReport?.fiscalYear,
+        halfYear,
+      });
+      setSelectedFiling(response.filing);
+      setUploadedRows(response.rows || []);
+      await loadBase();
+      setMessage(response.validation?.valid ? "Uploaded MCA Excel validated." : "Uploaded MCA Excel has validation errors.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading("");
+      event.target.value = "";
+    }
+  };
+
+  const generateXml = async () => {
+    if (!selectedFiling?.id) return;
+    setLoading("xml");
+    setError("");
+    setMessage("");
+    try {
+      const response = await generateMcaMsme1Xml({ filingId: selectedFiling.id, companyDetails });
+      setXmlGeneration(response);
+      if (response.generated) {
+        setMessage("MCA MSME-1 XML generated and ready to download.");
+        await loadBase();
+      } else {
+        setMessage("XML generation blocked. Fix validation errors first.");
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const downloadXml = async () => {
+    if (!xmlGeneration?.generationId) return;
+    await downloadUrl(mcaMsme1XmlDownloadUrl(xmlGeneration.generationId), `MCA_MSME1_${selectedFiling?.fiscalYear}_${selectedFiling?.halfYear}.xml`);
+  };
+
   const beginUpload = async () => {
     if (!selectedFiling?.id) return;
     setLoading("upload");
@@ -170,6 +237,17 @@ export default function MCAMSME1Filing() {
             </label>
           </div>
 
+          <div className="grid md:grid-cols-2 gap-4 mt-4">
+            <label className="block">
+              <span className="block text-xs font-semibold text-gray-700 mb-1">Company CIN</span>
+              <input value={companyDetails.cin} onChange={(event) => setCompanyDetails((prev) => ({ ...prev, cin: event.target.value }))} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" placeholder="Required for XML" />
+            </label>
+            <label className="block">
+              <span className="block text-xs font-semibold text-gray-700 mb-1">Company Name</span>
+              <input value={companyDetails.companyName} onChange={(event) => setCompanyDetails((prev) => ({ ...prev, companyName: event.target.value }))} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" placeholder="Required for XML" />
+            </label>
+          </div>
+
           <div className="flex flex-wrap gap-2 mt-5">
             <button onClick={runPreview} disabled={!reportId || Boolean(loading)} className="bg-blue-700 text-white px-5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
               {loading === "preview" ? "Preparing..." : "Preview MCA Rows"}
@@ -180,7 +258,21 @@ export default function MCAMSME1Filing() {
             {selectedFiling?.downloadUrl && (
               <button onClick={() => downloadFiling(selectedFiling)} className="bg-gray-900 text-white px-5 py-2 rounded-lg text-sm font-semibold">Download .xlsm</button>
             )}
+            <label className="bg-gray-100 text-gray-800 px-5 py-2 rounded-lg text-sm font-semibold cursor-pointer">
+              {loading === "upload-excel" ? "Uploading..." : "Upload Excel"}
+              <input type="file" accept=".xlsx,.xlsm" onChange={uploadExcel} className="hidden" disabled={!reportId || Boolean(loading)} />
+            </label>
+            <button onClick={generateXml} disabled={!selectedFiling?.id || Boolean(loading)} className="bg-purple-700 text-white px-5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
+              {loading === "xml" ? "Generating XML..." : "Generate XML"}
+            </button>
+            {xmlGeneration?.generated && (
+              <button onClick={downloadXml} className="bg-purple-100 text-purple-800 px-5 py-2 rounded-lg text-sm font-semibold">Download XML</button>
+            )}
           </div>
+
+          {uploadedRows.length > 0 && (
+            <p className="text-xs text-gray-500 mt-3">{uploadedRows.length.toLocaleString("en-IN")} supplier rows uploaded from MCA Excel.</p>
+          )}
 
           {selectedReport && (
             <div className="grid md:grid-cols-3 gap-3 mt-5">
@@ -226,6 +318,7 @@ export default function MCAMSME1Filing() {
               <SmallMetric label="Errors" value={blockingErrors.length} tone={blockingErrors.length ? "red" : "green"} />
               <SmallMetric label="Warnings" value={warnings.length} tone={warnings.length ? "yellow" : "gray"} />
               <SmallMetric label="Outstanding >45" value={`Rs ${formatMoney(preview.totals.outstandingMoreThan45Amount)}`} />
+              <SmallMetric label="Section 16 Interest" value={`Rs ${formatMoney(preview.totals.section16Interest)}`} tone="yellow" />
             </div>
           </div>
 
@@ -240,7 +333,7 @@ export default function MCAMSME1Filing() {
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-gray-50">
                 <tr>
-                  {["#", "Supplier", "PAN", "Paid <=45 Other", "Paid >45", "Outstanding <=45", "Outstanding >45", "Reason"].map((label) => (
+                  {["#", "Supplier", "PAN", "Paid <=45 Other", "Paid >45", "Outstanding <=45", "Outstanding >45", "Sec. 16 Interest", "Reason"].map((label) => (
                     <th key={label} className="text-left p-2 text-xs text-gray-600 whitespace-nowrap">{label}</th>
                   ))}
                 </tr>
@@ -255,11 +348,12 @@ export default function MCAMSME1Filing() {
                     <td className="p-2 text-xs text-right">{row.paidAfter45Count} / {formatMoney(row.paidAfter45Amount)}</td>
                     <td className="p-2 text-xs text-right">{row.outstanding45OrLessCount} / {formatMoney(row.outstanding45OrLessAmount)}</td>
                     <td className="p-2 text-xs text-right font-semibold">{row.outstandingMoreThan45Count} / {formatMoney(row.outstandingMoreThan45Amount)}</td>
+                    <td className="p-2 text-xs text-right font-semibold">{formatMoney(row.section16Interest)}</td>
                     <td className="p-2 text-xs min-w-64">{row.reason}</td>
                   </tr>
                 ))}
                 {!preview.rows.length && (
-                  <tr><td colSpan="8" className="p-4 text-sm text-gray-500">No MCA-eligible verified MSME rows found for this report.</td></tr>
+                  <tr><td colSpan="9" className="p-4 text-sm text-gray-500">No MCA-eligible verified MSME rows found for this report.</td></tr>
                 )}
               </tbody>
             </table>

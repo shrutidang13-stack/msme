@@ -8,7 +8,12 @@ function normalizeGroupName(name) {
 }
 
 function isSundryCreditorGroupName(name) {
-  return /\bSUNDRY\s+CREDITORS?\b/.test(normalizeGroupName(name));
+  const normalized = normalizeGroupName(name);
+  return (
+    /\bSUNDRY\s+CREDITORS?\b/.test(normalized) ||
+    /\bTRADE\s+PAYABLES?\b/.test(normalized) ||
+    /^(CREDITORS?|SUPPLIERS?)$/.test(normalized)
+  );
 }
 
 function isBlockedNonCreditorName(name) {

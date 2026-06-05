@@ -9,7 +9,7 @@ process.env.DATABASE_PATH = "backend/data/test-msme-guard.sqlite";
 process.env.DISABLE_BACKEND_AUTH = "true";
 
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
-const { validateUdyamNumber } = require("../services/udyamVerifier.service");
+const { validateUdyamNumber, verifyUdyamNumber } = require("../services/udyamVerifier.service");
 const env = require("../config/env");
 const {
   parseLedgerCollection,
@@ -28,17 +28,21 @@ const {
   parseTallyProcessList,
   companyContextStatus,
 } = require("../services/tally.service");
-const { createMSMEReport, calculateExcludedRows, calculateReportRows, buildEvidenceBundle, toCsv, toTallyReconciliationCsv } = require("../services/report.service");
+const { createMSMEReport, calculateExcludedRows, calculateReportRows, buildEvidenceBundle, toCsv, toTallyReconciliationCsv, toWorkbookBuffer } = require("../services/report.service");
 const { buildPayableAgingFromVouchers, enrichCreditorsWithVoucherAging } = require("../services/payableAging.service");
 const { buildTrialBalance, buildBalanceSheet, buildProfitLoss, deriveSundryCreditors } = require("../services/financialStatements.service");
 const { evaluateVendor, loadRulePack } = require("../services/msmeRuleEngine.service");
 const { calculateMSMEInterest } = require("../services/interestCalculator.service");
+const udyamFallbackService = require("../services/udyamFallback.service");
 const vendorRepository = require("../repositories/vendorRepository");
 const purchaseInvoiceRepository = require("../repositories/purchaseInvoiceRepository");
 const importRepository = require("../repositories/importRepository");
 const reportRepository = require("../repositories/reportRepository");
 const tallyImportService = require("../services/tallyImport.service");
 const mcaMsme1Service = require("../services/mcaMsme1.service");
+const taxAuditSchemaService = require("../services/taxAuditSchema.service");
+const taxAuditReportService = require("../services/taxAuditReport.service");
+const carryForwardService = require("../services/carryForward.service");
 const db = require("../config/database");
 
 function withMockTally(handler) {
@@ -108,6 +112,13 @@ test("validates Udyam number format", () => {
   assert.equal(validateUdyamNumber("ABC"), false);
 });
 
+test("invalid Udyam verification preserves the submitted number", async () => {
+  const result = await verifyUdyamNumber("UDYAM-XX-00-0000000");
+  assert.equal(result.udyamNumber, "UDYAM-XX-00-0000000");
+  assert.equal(result.verified, false);
+  assert.equal(result.verificationStatus, "invalid_format");
+});
+
 test("detects standard Sundry Creditors ledgers from all-ledger export", () => {
   const xml = `<ENVELOPE><LEDGER NAME="Acme Supplier"><PARENT>Sundry Creditors</PARENT><ISBILLWISEON>Yes</ISBILLWISEON><CLOSINGBALANCE>1000.00</CLOSINGBALANCE></LEDGER></ENVELOPE>`;
   const creditors = parseLedgerCollection(xml);
@@ -151,14 +162,14 @@ test("excludes non-Sundry ledgers even when bill-wise or payable-like", () => {
   assert.deepEqual(creditors.map((creditor) => creditor.name), ["Real Supplier"]);
 });
 
-test("excludes generic payable groups unless they are under Sundry Creditors", () => {
+test("detects trade payable groups and custom groups under Sundry Creditors", () => {
   const ledgerXml = `<ENVELOPE>
     <LEDGER NAME="Generic Payable"><PARENT>Trade Payables</PARENT><CLOSINGBALANCE>900.00 Cr</CLOSINGBALANCE></LEDGER>
     <LEDGER NAME="Child Payable"><PARENT>Trade Vendors</PARENT><CLOSINGBALANCE>800.00 Cr</CLOSINGBALANCE></LEDGER>
   </ENVELOPE>`;
   const groupXml = `<ENVELOPE><GROUP NAME="Trade Vendors"><PARENT>Sundry Creditors</PARENT></GROUP></ENVELOPE>`;
   const creditors = parseLedgerCollection(ledgerXml, "Sundry Creditors", groupXml);
-  assert.deepEqual(creditors.map((creditor) => creditor.name), ["Child Payable"]);
+  assert.deepEqual(creditors.map((creditor) => creditor.name), ["Generic Payable", "Child Payable"]);
 });
 
 test("excludes rows with missing group lineage", () => {
@@ -230,6 +241,44 @@ test("parses ledger voucher rows with debit and credit columns", () => {
   assert.equal(rows[0].credit, 36000);
   assert.equal(rows[0].particulars, "Accounting Charges");
   assert.equal(rows[1].debit, 100000);
+  assert.equal(rows[1].particulars, "Axis Bank");
+});
+
+test("detects common creditor group aliases from ledger hierarchy", () => {
+  const xml = `<ENVELOPE>
+    <LEDGER NAME="Trade Supplier"><PARENT>Trade Payables</PARENT><CLOSINGBALANCE>900.00 Cr</CLOSINGBALANCE></LEDGER>
+    <LEDGER NAME="Supplier Group Vendor"><PARENT>Supplier</PARENT><CLOSINGBALANCE>500.00 Cr</CLOSINGBALANCE></LEDGER>
+    <LEDGER NAME="Advance Vendor"><PARENT>Advance to Supplier</PARENT><CLOSINGBALANCE>1000.00 Dr</CLOSINGBALANCE></LEDGER>
+  </ENVELOPE>`;
+  const creditors = parseLedgerCollection(xml);
+  assert.deepEqual(creditors.map((creditor) => creditor.name), ["Trade Supplier", "Supplier Group Vendor"]);
+});
+
+test("does not count CMPINFO voucher counters as voucher rows", () => {
+  const xml = `<ENVELOPE><BODY><DESC><CMPINFO><VOUCHER>0</VOUCHER></CMPINFO></DESC><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>`;
+  assert.equal(parseVoucherCollection(xml).length, 0);
+});
+
+test("parses Tally Ledger Vouchers display rows", () => {
+  const xml = `<ENVELOPE>
+    <DSPVCHDATE>31-Mar-26</DSPVCHDATE>
+    <DSPVCHLEDACCOUNT>TRIO VELOCID</DSPVCHLEDACCOUNT>
+    <DSPVCHTYPE>Jrnl</DSPVCHTYPE>
+    <DSPVCHDRAMT></DSPVCHDRAMT>
+    <DSPVCHCRAMT>545606.00</DSPVCHCRAMT>
+    <DSPVCHDATE>28-Mar-26</DSPVCHDATE>
+    <DSPVCHLEDACCOUNT>Axis Bank</DSPVCHLEDACCOUNT>
+    <DSPVCHTYPE>Pymt</DSPVCHTYPE>
+    <DSPVCHDRAMT>-5000.00</DSPVCHDRAMT>
+    <DSPVCHCRAMT></DSPVCHCRAMT>
+  </ENVELOPE>`;
+  const rows = parseLedgerVouchers(xml, "Upgrid Solutions Private Limited");
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].date, "2026-03-31");
+  assert.equal(rows[0].credit, 545606);
+  assert.equal(rows[0].particulars, "TRIO VELOCID");
+  assert.equal(rows[1].date, "2026-03-28");
+  assert.equal(rows[1].debit, 5000);
   assert.equal(rows[1].particulars, "Axis Bank");
 });
 
@@ -318,6 +367,39 @@ test("custom import period accepts arbitrary valid date range and rejects revers
     }),
     /fromDate must be before or equal to toDate/
   );
+});
+
+test("custom two-year import period splits into FY chunks and caps by as-on by default", () => {
+  const periods = tallyImportService.financialYearPeriodsForImport({
+    periodType: "custom",
+    fiscalYear: "custom",
+    fromDate: "20250401",
+    toDate: "20270331",
+    asOn: "2026-05-28",
+  });
+  assert.deepEqual(periods.map((period) => period.financialYear), ["2025-26", "2026-27"]);
+  assert.deepEqual(periods.map((period) => [period.reportFromDate, period.reportToDate]), [
+    ["20250401", "20260331"],
+    ["20260401", "20260528"],
+  ]);
+  assert.equal(periods[1].cappedByAsOn, true);
+});
+
+test("custom two-year import period can cap current FY by as-on when requested", () => {
+  const periods = tallyImportService.financialYearPeriodsForImport({
+    periodType: "custom",
+    fiscalYear: "custom",
+    fromDate: "20250401",
+    toDate: "20270331",
+    asOn: "2026-05-28",
+    capToAsOn: true,
+  });
+  assert.deepEqual(periods.map((period) => period.financialYear), ["2025-26", "2026-27"]);
+  assert.deepEqual(periods.map((period) => [period.reportFromDate, period.reportToDate]), [
+    ["20250401", "20260331"],
+    ["20260401", "20260528"],
+  ]);
+  assert.equal(periods[1].cappedByAsOn, true);
 });
 
 test("parses full Day Book voucher collection rows for non-creditor and creditor ledgers", () => {
@@ -536,7 +618,7 @@ test("parses multiple TallyPrime process diagnostics", () => {
   assert.deepEqual(processes.map((item) => item.pid), ["1112", "2211"]);
 });
 
-test("Tally health accepts TallyPrime server running ping response and standard List of Accounts export", async () => {
+test("Tally health accepts TallyPrime server running ping response and lightweight company context export", async () => {
   const mock = await withMockTally(async (req, res) => {
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "text/xml" });
@@ -544,8 +626,8 @@ test("Tally health accepts TallyPrime server running ping response and standard 
       return;
     }
     const body = await readRequestBody(req);
-    assert.match(body, /<REPORTNAME>List of Accounts<\/REPORTNAME>/);
-    assert.doesNotMatch(body, /<TYPE>System<\/TYPE>|<TYPE>Collection<\/TYPE>|MSME/);
+    assert.match(body, /MSME Company Context Probe/);
+    assert.doesNotMatch(body, /<TYPE>System<\/TYPE>|<REPORTNAME>List of Accounts<\/REPORTNAME>/);
     res.writeHead(200, { "Content-Type": "text/xml" });
     res.end(`<ENVELOPE><LEDGER NAME="Demo Supplier"><PARENT>Sundry Creditors</PARENT><CLOSINGBALANCE>1.00</CLOSINGBALANCE></LEDGER></ENVELOPE>`);
   });
@@ -576,7 +658,7 @@ test("Tally health does not send unsupported Current Company system request", as
     const health = await runWithTallyPort(mock.port, () => tallyHealth());
     assert.equal(health.xmlPostWorking, true);
     assert.equal(requests.some((body) => body.includes("<TYPE>System</TYPE>")), false);
-    assert.equal(requests.every((body) => body.includes("List of Accounts")), true);
+    assert.equal(requests.every((body) => body.includes("MSME Company Context Probe")), true);
     assert.equal(requests.every((body) => body.includes("<SVCURRENTCOMPANY>Test Company</SVCURRENTCOMPANY>")), true);
   } finally {
     await mock.close();
@@ -640,7 +722,7 @@ test("Tally health reports XML POST failure after successful GET", async () => {
     assert.equal(health.portOpen, true);
     assert.equal(health.serverRunning, true);
     assert.equal(health.xmlPostWorking, false);
-    assert.equal(health.error, "Tally server is reachable, but XML export request failed.");
+    assert.equal(health.error, "Tally returned HTTP 500 while processing XML export.");
     assert.doesNotMatch(health.message, /port.*unreachable/i);
   } finally {
     await mock.close();
@@ -670,7 +752,7 @@ test("Tally health accepts valid XML export response", async () => {
   }
 });
 
-test("Tally health fails when List of Accounts returns empty collection metadata", async () => {
+test("Tally health fails when company context probe returns empty collection metadata", async () => {
   const mock = await withMockTally(async (req, res) => {
     if (req.method === "GET") {
       res.writeHead(200, { "Content-Type": "text/xml" });
@@ -688,7 +770,7 @@ test("Tally health fails when List of Accounts returns empty collection metadata
     assert.equal(health.xmlPostWorking, false);
     assert.equal(health.companyDetected, true);
     assert.equal(health.companyName, "Test Company");
-    assert.equal(health.error, "Tally server is reachable, but XML export request failed.");
+    assert.match(health.error, /returned only metadata/);
   } finally {
     await mock.close();
   }
@@ -783,7 +865,11 @@ test("Tally import fails when XML POST health test fails", async () => {
           actor: "unit-test",
         })
       ),
-      /Tally server is reachable, but XML export request failed/
+      (error) => {
+        assert.match(error.message, /Tally server is reachable, but XML export request failed/);
+        assert.equal(error.status, 502);
+        return true;
+      }
     );
   } finally {
     await mock.close();
@@ -888,8 +974,15 @@ test("Tally import persists voucher rows and retrieves them for review", async (
       sendXml(res, `<ENVELOPE><LEDGER NAME="Acme Supplier"><PARENT>Sundry Creditors</PARENT><OPENINGBALANCE>100.00 Dr</OPENINGBALANCE><CLOSINGBALANCE>1400.00 Cr</CLOSINGBALANCE><ISBILLWISEON>Yes</ISBILLWISEON></LEDGER></ENVELOPE>`);
       return;
     }
+    if (body.includes("Day Book")) {
+      const from = body.match(/<SVFROMDATE>([^<]+)<\/SVFROMDATE>/)?.[1] || "";
+      sendXml(res, from === "20250401"
+        ? `<ENVELOPE>${voucherXml({ ledgerName: "Acme Supplier", date: "20250502", number: "PB-77", amount: "-1400.00", bill: "INV-77" })}</ENVELOPE>`
+        : "<ENVELOPE></ENVELOPE>");
+      return;
+    }
     if (body.includes("MSME Voucher Collection")) {
-      sendXml(res, `<ENVELOPE>${voucherXml({ ledgerName: "Acme Supplier", date: "20250502", number: "PB-77", amount: "-1400.00", bill: "INV-77" })}</ENVELOPE>`);
+      sendXml(res, "<ENVELOPE></ENVELOPE>");
       return;
     }
     sendXml(res, "<ENVELOPE></ENVELOPE>");
@@ -923,13 +1016,105 @@ test("Tally import persists voucher rows and retrieves them for review", async (
     assert.equal(review.ledgerVouchers.rows[0].voucherType, "Purchase");
     assert.equal(review.ledgerVouchers.rows[0].credit, 1400);
     assert.equal(review.ledgerVouchers.rows[0].billReference, "INV-77");
-    assert.equal(review.ledgerVouchers.rows[0].voucherSource, "Voucher Collection");
+    assert.equal(review.ledgerVouchers.rows[0].voucherSource, "Day Book");
     assert.equal(result.importRun.summary.selectedFinancialYear, "2025-26");
-    assert.equal(result.importRun.summary.voucherSource, "Voucher Collection");
+    assert.equal(result.importRun.summary.voucherSource, "Day Book");
     assert.equal(result.importRun.summary.fallbackUsed, false);
     assert.equal(result.importRun.summary.creditorsImported, 1);
     assert.equal(result.importRun.summary.vouchersParsed, 1);
     assert.equal(result.importRun.summary.vouchersPersisted, 1);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("Tally import falls back to creditor ledger vouchers when full Day Book is blank", async () => {
+  const seen = { ledgerFallback: 0 };
+  const mock = await withMockTally(async (req, res) => {
+    if (req.method === "GET") {
+      sendXml(res, "<RESPONSE>TallyPrime Server is Running</RESPONSE>");
+      return;
+    }
+    const body = await readRequestBody(req);
+    if (body.includes("List of Accounts")) {
+      sendXml(res, `<ENVELOPE><LEDGER NAME="Acme Supplier"><PARENT>Sundry Creditors</PARENT><CLOSINGBALANCE>1400.00 Cr</CLOSINGBALANCE><ISBILLWISEON>Yes</ISBILLWISEON></LEDGER></ENVELOPE>`);
+      return;
+    }
+    if (body.includes("MSME Voucher Collection")) {
+      sendXml(res, "<ENVELOPE></ENVELOPE>");
+      return;
+    }
+    if (body.includes("Ledger Vouchers")) {
+      seen.ledgerFallback += 1;
+      sendXml(res, `<ENVELOPE>${voucherXml({ ledgerName: "Acme Supplier", date: "20250502", number: "LV-77", amount: "-1400.00", bill: "INV-77" })}</ENVELOPE>`);
+      return;
+    }
+    sendXml(res, "<ENVELOPE></ENVELOPE>");
+  });
+  try {
+    const result = await runWithTallyPort(mock.port, () =>
+      tallyImportService.importFromTally({
+        fiscalYear: "2025-26",
+        fromDate: "20250401",
+        toDate: "20260331",
+        actor: "unit-test",
+      })
+    );
+    assert.equal(result.success, true);
+    assert.equal(seen.ledgerFallback >= 1, true);
+    assert.equal(result.ledgerVoucherSummary.totalRows, 1);
+    assert.equal(result.ledgerVoucherSummary.persistedRows, 1);
+    assert.match(result.importRun.summary.voucherSource, /Ledger Vouchers/);
+  } finally {
+    await mock.close();
+  }
+});
+
+test("Tally import rejects out-of-range Day Book rows before creditor ledger fallback", async () => {
+  const seen = { dayBook: 0, ledgerFallback: 0 };
+  const mock = await withMockTally(async (req, res) => {
+    if (req.method === "GET") {
+      sendXml(res, "<RESPONSE>TallyPrime Server is Running</RESPONSE>");
+      return;
+    }
+    const body = await readRequestBody(req);
+    if (body.includes("List of Accounts") || body.includes("MSME Ledger Master Collection")) {
+      sendXml(res, `<ENVELOPE><LEDGER NAME="Acme Supplier"><PARENT>Sundry Creditors</PARENT><CLOSINGBALANCE>700.00 Cr</CLOSINGBALANCE><ISBILLWISEON>Yes</ISBILLWISEON></LEDGER></ENVELOPE>`);
+      return;
+    }
+    if (body.includes("Day Book")) {
+      seen.dayBook += 1;
+      sendXml(res, `<ENVELOPE>${voucherXml({ ledgerName: "Retail Customer", date: "20260531", number: "WRONG-FY", amount: "-700.00", bill: "WRONG" })}</ENVELOPE>`);
+      return;
+    }
+    if (body.includes("MSME Voucher Collection")) {
+      sendXml(res, "<ENVELOPE></ENVELOPE>");
+      return;
+    }
+    if (body.includes("Ledger Vouchers")) {
+      seen.ledgerFallback += 1;
+      sendXml(res, `<ENVELOPE>${voucherXml({ ledgerName: "Acme Supplier", date: "20250502", number: "LV-FY25", amount: "-1400.00", bill: "INV-FY25" })}</ENVELOPE>`);
+      return;
+    }
+    sendXml(res, "<ENVELOPE></ENVELOPE>");
+  });
+  try {
+    const result = await runWithTallyPort(mock.port, () =>
+      tallyImportService.importFromTally({
+        fiscalYear: "2025-26",
+        fromDate: "20250401",
+        toDate: "20260331",
+        actor: "unit-test",
+      })
+    );
+    assert.equal(result.success, true);
+    assert.equal(seen.dayBook >= 1, true);
+    assert.equal(seen.ledgerFallback >= 1, true);
+    assert.equal(result.ledgerVoucherSummary.totalRows, 1);
+    const review = tallyImportService.getLedgerVouchers(result.importRun.id, { financialYear: "2025-26", limit: 10 });
+    assert.equal(review.ledgerVouchers.total, 1);
+    assert.equal(review.ledgerVouchers.rows[0].voucherNumber, "LV-FY25");
+    assert.equal(review.ledgerVouchers.rows[0].voucherSource, "Ledger Vouchers");
   } finally {
     await mock.close();
   }
@@ -962,7 +1147,7 @@ test("Tally import fetches complete creditor ledger entries date-wise for review
       );
       return;
     }
-    if (body.includes("MSME Voucher Collection")) {
+    if (body.includes("Day Book") || body.includes("MSME Voucher Collection")) {
       const from = body.match(/<SVFROMDATE>([^<]+)<\/SVFROMDATE>/)?.[1] || "";
       if (from === "20250401") {
         sendXml(
@@ -1036,7 +1221,7 @@ test("Tally import fetches complete creditor ledger entries date-wise for review
   }
 });
 
-test("Tally import persists primary Voucher Collection source without fallback warning", async () => {
+test("Tally import persists primary Day Book source without fallback warning", async () => {
   const seen = { dayBook: 0, collection: 0 };
   const mock = await withMockTally(async (req, res) => {
     if (req.method === "GET") {
@@ -1044,9 +1229,12 @@ test("Tally import persists primary Voucher Collection source without fallback w
       return;
     }
     const body = await readRequestBody(req);
-    if (body.includes("MSME Voucher Collection")) {
-      seen.collection += 1;
-      sendXml(res, `<ENVELOPE>${voucherXml({ ledgerName: "Acme Supplier", date: "20260401", number: "COLL-IMPORT-1", amount: "-700.00", bill: "COLL-BILL" })}</ENVELOPE>`);
+    if (body.includes("Day Book")) {
+      seen.dayBook += 1;
+      const from = body.match(/<SVFROMDATE>([^<]+)<\/SVFROMDATE>/)?.[1] || "";
+      sendXml(res, from === "20260401"
+        ? `<ENVELOPE>${voucherXml({ ledgerName: "Acme Supplier", date: "20260401", number: "COLL-IMPORT-1", amount: "-700.00", bill: "COLL-BILL" })}</ENVELOPE>`
+        : "<ENVELOPE></ENVELOPE>");
       return;
     }
     if (body.includes("List of Accounts")) {
@@ -1057,8 +1245,8 @@ test("Tally import persists primary Voucher Collection source without fallback w
       sendXml(res, `<ENVELOPE><LEDGER NAME="Acme Supplier"><PARENT>Sundry Creditors</PARENT><OPENINGBALANCE>0.00</OPENINGBALANCE><CLOSINGBALANCE>700.00 Cr</CLOSINGBALANCE><ISBILLWISEON>Yes</ISBILLWISEON></LEDGER></ENVELOPE>`);
       return;
     }
-    if (body.includes("Day Book")) {
-      seen.dayBook += 1;
+    if (body.includes("MSME Voucher Collection")) {
+      seen.collection += 1;
       sendXml(res, `<ENVELOPE>${voucherXml({ ledgerName: "Retail Customer", date: "20260401", number: "SALE-1", amount: "-700.00", bill: "SALE-BILL" })}</ENVELOPE>`);
       return;
     }
@@ -1074,10 +1262,9 @@ test("Tally import persists primary Voucher Collection source without fallback w
       })
     );
     assert.equal(result.success, true);
-    assert.equal(seen.dayBook <= 1, true);
-    assert.equal(seen.collection >= 4, true);
+    assert.equal(seen.dayBook >= 1, true);
     assert.equal(result.importRun.summary.selectedFinancialYear, "2026-27");
-    assert.equal(result.importRun.summary.voucherSource, "Voucher Collection");
+    assert.equal(result.importRun.summary.voucherSource, "Day Book");
     assert.equal(result.importRun.summary.fallbackUsed, false);
     assert.equal(result.importRun.summary.creditorsImported, 1);
     assert.equal(result.importRun.summary.vouchersParsed, 1);
@@ -1086,7 +1273,7 @@ test("Tally import persists primary Voucher Collection source without fallback w
 
     const review = tallyImportService.getLedgerVouchers(result.importRun.id, { fiscalYear: "2026-27", limit: 10 });
     assert.equal(review.ledgerVouchers.total, 1);
-    assert.equal(review.ledgerVouchers.rows[0].voucherSource, "Voucher Collection");
+    assert.equal(review.ledgerVouchers.rows[0].voucherSource, "Day Book");
     assert.equal(review.ledgerVouchers.rows[0].voucherNumber, "COLL-IMPORT-1");
   } finally {
     await mock.close();
@@ -1156,6 +1343,41 @@ test("voucher retrieval is scoped to the requested importRunId", () => {
     () => createMSMEReport({ importRunId: firstRunId, fiscalYear: "2026-27", actor: "unit-test" }),
     /Import run fiscal year mismatch/
   );
+});
+
+test("custom import FY filter returns only selected FY rows and All FY remains grouped", () => {
+  const runId = importRepository.createRun({
+    fiscalYear: "custom",
+    periodType: "custom",
+    fromDate: "20250401",
+    toDate: "20270331",
+    asOn: "2026-05-28",
+    companyName: "Test Company",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, {
+    summary: {
+      fiscalYear: "custom",
+      companyName: "Test Company",
+      financialYears: ["2025-26", "2026-27"],
+      financialYearPeriods: [
+        { financialYear: "2025-26", fyStartDate: "20250401", fyEndDate: "20260331", reportFromDate: "20250401", reportToDate: "20260331", asOnDate: "2026-05-28" },
+        { financialYear: "2026-27", fyStartDate: "20260401", fyEndDate: "20270331", reportFromDate: "20260401", reportToDate: "20260528", asOnDate: "2026-05-28", cappedByAsOn: true },
+      ],
+    },
+    creditors: [],
+    ledgerVouchers: [
+      { ledgerName: "Split Supplier", normalizedLedgerName: "SPLIT SUPPLIER", date: "2025-05-01", voucherType: "Purchase", voucherNumber: "FY25", credit: 100, amount: 100, financialYear: "2025-26", reportFromDate: "20250401", reportToDate: "20260331" },
+      { ledgerName: "Split Supplier", normalizedLedgerName: "SPLIT SUPPLIER", date: "2026-04-15", voucherType: "Purchase", voucherNumber: "FY26", credit: 200, amount: 200, financialYear: "2026-27", reportFromDate: "20260401", reportToDate: "20260528" },
+    ],
+  });
+
+  const fy25 = tallyImportService.getLedgerVouchers(runId, { financialYear: "2025-26", limit: 10 }).ledgerVouchers.rows;
+  const fy26 = tallyImportService.getLedgerVouchers(runId, { financialYear: "2026-27", limit: 10 }).ledgerVouchers.rows;
+  const all = tallyImportService.getLedgerVouchers(runId, { financialYear: "all", limit: 10 }).ledgerVouchers.rows;
+  assert.deepEqual(fy25.map((row) => row.voucherNumber), ["FY25"]);
+  assert.deepEqual(fy26.map((row) => row.voucherNumber), ["FY26"]);
+  assert.deepEqual(all.map((row) => row.financialYear), ["2025-26", "2026-27"]);
 });
 
 test("voucher persistence skips duplicate vouchers within an import run", () => {
@@ -1274,7 +1496,7 @@ test("MSME report uses persisted vouchers for payable aging", () => {
   assert.equal(report.report[0].vendorName, "Report Aging Supplier");
   assert.equal(report.report[0].outstandingAmount, 999);
   assert.equal(report.report[0].daysOutstanding, 61);
-  assert.equal(report.report[0].delayDays, 16);
+  assert.equal(report.report[0].delayDays, 46);
   assert.equal(report.report[0].disallowed, 999);
   assert.equal(report.report[0].appliedRules.includes("ITA-ACTUAL-PAYMENT-037"), false);
   assert.equal(report.report[0].appliedRules.includes("ITA-2025-ACTUAL-PAYMENT-037"), true);
@@ -1283,6 +1505,300 @@ test("MSME report uses persisted vouchers for payable aging", () => {
   assert.match(bundle.toString("latin1"), /legal-source-manifest\.json/);
   assert.match(toCsv(report), /Legal Source Files/);
   assert.match(toTallyReconciliationCsv(report), /Report Aging Supplier/);
+});
+
+test("report schedules preserve acceptance date, paid-late Clause 26 amount, Section 23, and baseline validation", () => {
+  vendorRepository.upsertVendorStatus(
+    {
+      vendorName: "Strict Schedule Supplier",
+      isMSME: true,
+      verificationStatus: "verified",
+      udyamStatus: "verified",
+      udyamNumber: "UDYAM-DL-01-1111111",
+      enterpriseType: "Micro",
+      agreedPaymentDays: 60,
+    },
+    "unit-test",
+    "unit_test"
+  );
+  const runId = importRepository.createRun({
+    fiscalYear: "2025-26",
+    fromDate: "20250401",
+    toDate: "20260331",
+    asOn: "2026-03-31",
+    companyName: "Test Company",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, {
+    summary: { fiscalYear: "2025-26", companyName: "Test Company" },
+    creditors: [{
+      party: "Strict Schedule Supplier",
+      normalizedVendorName: "STRICT SCHEDULE SUPPLIER",
+      parent: "Sundry Creditors",
+      groupHierarchy: ["Sundry Creditors"],
+      openingBalance: -250,
+      outstandingAmount: 1000,
+    }],
+    ledgerVouchers: [
+      {
+        ledgerName: "Strict Schedule Supplier",
+        normalizedLedgerName: "STRICT SCHEDULE SUPPLIER",
+        date: "2025-04-10",
+        voucherType: "Purchase",
+        voucherNumber: "ACCEPT-INV",
+        credit: 1000,
+        amount: 1000,
+        billReference: "ACCEPT-INV",
+        raw: { acceptanceDate: "2025-04-20", agreedPaymentDays: 60 },
+      },
+      {
+        ledgerName: "Strict Schedule Supplier",
+        normalizedLedgerName: "STRICT SCHEDULE SUPPLIER",
+        date: "2025-05-01",
+        voucherType: "Purchase",
+        voucherNumber: "PAID-LATE-500",
+        credit: 500,
+        amount: 500,
+        billReference: "PAID-LATE-500",
+        raw: { agreedPaymentDays: 15 },
+      },
+      {
+        ledgerName: "Strict Schedule Supplier",
+        normalizedLedgerName: "STRICT SCHEDULE SUPPLIER",
+        date: "2025-06-30",
+        voucherType: "Payment",
+        voucherNumber: "PAY-LATE-500",
+        debit: 500,
+        amount: 500,
+        billReference: "PAID-LATE-500",
+      },
+    ],
+  });
+  const report = createMSMEReport({ importRunId: runId, fiscalYear: "2025-26", actor: "unit-test" });
+  const accept = report.schedules.invoiceAging.find((row) => row.invoiceNumber === "ACCEPT-INV");
+  const paidLate = report.schedules.clause26.find((row) => row.invoiceNumber === "PAID-LATE-500" && row.status === "paid_late");
+  assert.equal(accept.acceptanceDate, "2025-04-20");
+  assert.equal(accept.appointedDay, "2025-06-04");
+  assert.equal(paidLate.paidLateAmount, 500);
+  assert.ok(report.schedules.msmedSection16Interest.length > 0);
+  assert.ok(report.schedules.msmedSection23PermanentDisallowance.length > 0);
+  assert.equal(report.schedules.baselineValidation[0].baselineDate, "2025-03-31");
+  assert.equal(report.schedules.baselineValidation[0].status, "unavailable");
+  assert.match(report.schedules.baselineValidation[0].warning, /snapshot is unavailable/i);
+});
+
+test("FY-wise MSME report derives ledger outstanding from FY movement instead of cumulative ledger closing balance", () => {
+  vendorRepository.upsertVendorStatus(
+    {
+      vendorName: "Scoped Supplier",
+      isMSME: true,
+      verificationStatus: "verified",
+      udyamStatus: "verified",
+      udyamNumber: "UDYAM-DL-01-7654321",
+      enterpriseType: "Micro",
+      enterpriseName: "Scoped Supplier",
+    },
+    "unit-test",
+    "unit_test"
+  );
+  const runId = importRepository.createRun({
+    fiscalYear: "custom",
+    periodType: "custom",
+    fromDate: "20250401",
+    toDate: "20270331",
+    asOn: "2026-05-28",
+    companyName: "Test Company",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, {
+    summary: {
+      fiscalYear: "custom",
+      companyName: "Test Company",
+      financialYears: ["2025-26", "2026-27"],
+      financialYearPeriods: [
+        { financialYear: "2025-26", fyStartDate: "20250401", fyEndDate: "20260331", reportFromDate: "20250401", reportToDate: "20260331", asOnDate: "2026-05-28" },
+        { financialYear: "2026-27", fyStartDate: "20260401", fyEndDate: "20270331", reportFromDate: "20260401", reportToDate: "20260528", asOnDate: "2026-05-28", cappedByAsOn: true },
+      ],
+    },
+    creditors: [{
+      party: "Scoped Supplier",
+      normalizedVendorName: "SCOPED SUPPLIER",
+      parent: "Sundry Creditors",
+      groupHierarchy: ["Sundry Creditors"],
+      outstandingAmount: 10000,
+      closingBalance: -10000,
+    }],
+    ledgerVouchers: [
+      { ledgerName: "Scoped Supplier", normalizedLedgerName: "SCOPED SUPPLIER", date: "2026-04-01", voucherType: "Purchase", voucherNumber: "FY26-P", credit: 300, amount: 300, billReference: "FY26-B", financialYear: "2026-27", reportFromDate: "20260401", reportToDate: "20260528" },
+      { ledgerName: "Scoped Supplier", normalizedLedgerName: "SCOPED SUPPLIER", date: "2026-04-20", voucherType: "Payment", voucherNumber: "FY26-PAY", debit: 100, amount: 100, billReference: "FY26-B", financialYear: "2026-27", reportFromDate: "20260401", reportToDate: "20260528" },
+    ],
+  });
+
+  const report = createMSMEReport({ importRunId: runId, fiscalYear: "2026-27", asOnDate: "2026-05-28", actor: "unit-test" });
+  assert.equal(report.summary.selectedFinancialYear, "2026-27");
+  assert.equal(report.summary.reportToDate, "20260528");
+  assert.equal(report.summary.cappedByAsOn, true);
+  assert.equal(report.report.length, 1);
+  assert.equal(report.report[0].ledgerOutstandingAmount, 200);
+  assert.equal(report.report[0].voucherOutstandingAmount, 200);
+  assert.equal(report.report[0].outstandingAmount, 200);
+});
+
+test("All FY MSME report exposes year-wise summary groups", () => {
+  const latest = importRepository.listRuns().find((run) => run.fiscalYear === "custom");
+  const report = createMSMEReport({ importRunId: latest.id, fiscalYear: "all", asOnDate: "2026-05-28", actor: "unit-test" });
+  assert.equal(report.summary.selectedFinancialYear, "all");
+  assert.ok(report.summary.financialYearSummaries.some((row) => row.financialYear === "2026-27"));
+});
+
+test("MSME compliance workbook export includes all statutory verification sheets", () => {
+  const latest = reportRepository.listReports()[0];
+  const buffer = toWorkbookBuffer(latest);
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  assert.deepEqual(workbook.SheetNames, [
+    "Executive Summary",
+    "Creditor Ledger Summary",
+    "MSME Vendor Registry",
+    "Ledger-wise MSME Interest",
+    "Voucher-wise Delay Evidence",
+    "Tax Disallowance Summary",
+    "Clause 22 MSME Computation",
+    "43B(h) From Clause 22",
+    "Clause 26A Carry Forward",
+    "Form 3CD Clause 22",
+    "Form 3CD Clause 26",
+    "Schedule III Disclosure",
+    "Verification Required",
+    "MCA MSME Form-1 Data",
+    "Assumptions & Notes",
+  ]);
+});
+
+test("Clause 22(iii)(b), 43B(h), report summary, and Excel workbook totals reconcile", () => {
+  const latest = reportRepository.listReports()[0];
+  const clause22Total = latest.schedules.clause22Computation.reduce((sum, row) => sum + Number(row.clause22iiiBOutstandingDisallowance || 0), 0);
+  const clause43Total = latest.schedules.clause43BhFromClause22.reduce((sum, row) => sum + Number(row.principalDisallowance || 0), 0);
+  assert.equal(Math.round(clause43Total * 100), Math.round(clause22Total * 100));
+  assert.equal(Math.round(Number(latest.summary.totalDisallowed || 0) * 100), Math.round(clause22Total * 100));
+
+  const workbook = XLSX.read(toWorkbookBuffer(latest), { type: "buffer" });
+  const clause22Rows = XLSX.utils.sheet_to_json(workbook.Sheets["Clause 22 MSME Computation"]);
+  const clause43Rows = XLSX.utils.sheet_to_json(workbook.Sheets["43B(h) From Clause 22"]);
+  const clause22ExcelTotal = clause22Rows.find((row) => row.financialYear === "Total")?.clause22iiiBOutstandingDisallowance || 0;
+  const clause43ExcelTotal = clause43Rows.find((row) => row.financialYear === "Total")?.principalDisallowance || 0;
+  assert.equal(Math.round(Number(clause22ExcelTotal) * 100), Math.round(clause22Total * 100));
+  assert.equal(Math.round(Number(clause43ExcelTotal) * 100), Math.round(clause43Total * 100));
+});
+
+test("latest completed Tally import restore service returns persisted run and creditors", () => {
+  const latest = importRepository.getLatestCompletedRun();
+  assert.equal(latest.status, "completed");
+  const restored = tallyImportService.getLatestCompletedImportRun();
+  assert.equal(restored.importRun.id, latest.id);
+  assert.ok(Array.isArray(restored.creditors));
+  assert.ok(restored.verificationSummary);
+});
+
+test("Clause 26(A) carry-forward register deducts prior-year 43B(h) on actual current-year payment", () => {
+  const priorRunId = importRepository.createRun({
+    fiscalYear: "2025-26",
+    fromDate: "20250401",
+    toDate: "20260331",
+    asOn: "2026-03-31",
+    companyName: "Carry Forward Test Co",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(priorRunId, {
+    summary: { fiscalYear: "2025-26", companyName: "Carry Forward Test Co" },
+    creditors: [],
+    ledgerVouchers: [],
+  });
+  const priorReport = reportRepository.createReport({
+    importRunId: priorRunId,
+    fiscalYear: "2025-26",
+    summary: {},
+    report: {
+      included: [],
+      excluded: [],
+      schedules: {
+        clause43BhFromClause22: [{
+          financialYear: "2025-26",
+          vendorName: "Carry Supplier",
+          supplier: "Carry Supplier",
+          panNumber: "ABCDE1234F",
+          udyamNumber: "UDYAM-DL-01-1234567",
+          invoiceNumber: "CF-INV-1",
+          invoiceDate: "2026-03-01",
+          principalDisallowance: 1000,
+          sourceClause: "Clause 22(iii)(b)",
+          allowedInYear: "Year of actual payment",
+        }],
+      },
+    },
+    actor: "unit-test",
+  });
+  const currentRunId = importRepository.createRun({
+    fiscalYear: "2026-27",
+    fromDate: "20260401",
+    toDate: "20270331",
+    asOn: "2027-03-31",
+    companyName: "Carry Forward Test Co",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(currentRunId, {
+    summary: { fiscalYear: "2026-27", companyName: "Carry Forward Test Co" },
+    creditors: [],
+    ledgerVouchers: [{
+      vendorName: "Carry Supplier",
+      ledgerName: "Carry Supplier",
+      date: "2026-04-15",
+      voucherType: "Payment",
+      voucherNumber: "PAY-CF-1",
+      billReference: "CF-INV-1",
+      debit: 600,
+      amount: 600,
+    }],
+  });
+  const currentReport = reportRepository.createReport({
+    importRunId: currentRunId,
+    fiscalYear: "2026-27",
+    summary: {},
+    report: { included: [], excluded: [], schedules: {} },
+    actor: "unit-test",
+  });
+
+  const register = carryForwardService.buildRegister(currentReport.id, { priorReportId: priorReport.id });
+  assert.equal(register.rows.length, 1);
+  assert.equal(register.rows[0].openingDisallowance, 1000);
+  assert.equal(register.rows[0].deductibleCurrentYear, 600);
+  assert.equal(register.rows[0].closingCarryForward, 400);
+  assert.equal(register.summary.deductibleCurrentYear, 600);
+});
+
+test("report warns and lists pending vendors when no verified MSME vendors exist", () => {
+  const runId = importRepository.createRun({
+    fiscalYear: "2025-26",
+    fromDate: "20250401",
+    toDate: "20260331",
+    asOn: "2026-03-31",
+    companyName: "Test Company",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, {
+    summary: { fiscalYear: "2025-26", companyName: "Test Company" },
+    creditors: [{
+      party: "Pending MSME Supplier",
+      normalizedVendorName: "PENDING MSME SUPPLIER",
+      parent: "Sundry Creditors",
+      groupHierarchy: ["Sundry Creditors"],
+      outstandingAmount: 1000,
+    }],
+    ledgerVouchers: [],
+  });
+  const report = createMSMEReport({ importRunId: runId, fiscalYear: "2025-26", actor: "unit-test" });
+  assert.equal(report.report.length, 0);
+  assert.match(report.summary.noVerifiedMSMEWarning, /No verified MSME vendors/);
+  assert.ok(report.excluded.some((row) => row.vendorName === "Pending MSME Supplier"));
 });
 
 test("Tally creditor export returns diagnostics for empty creditor dataset", async () => {
@@ -1413,7 +1929,7 @@ test("Tally creditor export treats unmarked Sundry Creditor master amounts as cr
 test("voucher export handles large batched datasets", async () => {
   const mock = await withMockTally(async (req, res) => {
     const body = await readRequestBody(req);
-    if (!body.includes("MSME Voucher Collection")) return sendXml(res, "<ENVELOPE></ENVELOPE>");
+    if (!body.includes("Day Book") && !body.includes("MSME Voucher Collection")) return sendXml(res, "<ENVELOPE></ENVELOPE>");
     const date = body.match(/<SVFROMDATE>(\d+)<\/SVFROMDATE>/)?.[1] || "20250501";
     const vouchers = Array.from({ length: 25 }, (_, index) =>
       voucherXml({ ledgerName: "Acme Supplier", date, number: `L-${date}-${index}`, amount: "-100.00", bill: `B-${index}` })
@@ -1440,7 +1956,7 @@ test("voucher export tolerates slow Tally responses within 60s timeout", async (
   process.env.TALLY_VOUCHER_TIMEOUT_MS = "1000";
   const mock = await withMockTally(async (req, res) => {
     const body = await readRequestBody(req);
-    if (!body.includes("MSME Voucher Collection")) return sendXml(res, "<ENVELOPE></ENVELOPE>");
+    if (!body.includes("Day Book") && !body.includes("MSME Voucher Collection")) return sendXml(res, "<ENVELOPE></ENVELOPE>");
     setTimeout(() => sendXml(res, `<ENVELOPE>${voucherXml({ ledgerName: "Acme Supplier", number: "SLOW-1" })}</ENVELOPE>`), 150);
   });
   try {
@@ -1514,7 +2030,7 @@ test("voucher export merges quarter batches", async () => {
   }
 });
 
-test("voucher export uses filtered Voucher Collection as the primary path", async () => {
+test("voucher export falls back to filtered Voucher Collection when Day Book has no creditor rows", async () => {
   const seen = { dayBook: 0, collection: 0 };
   const mock = await withMockTally(async (req, res) => {
     const body = await readRequestBody(req);
@@ -1536,14 +2052,14 @@ test("voucher export uses filtered Voucher Collection as the primary path", asyn
         to: "20260630",
       })
     );
-    assert.equal(seen.dayBook, 0);
+    assert.equal(seen.dayBook, 1);
     assert.equal(seen.collection, 1);
     assert.equal(result.rows.length, 1);
     assert.equal(result.rows[0].voucherNumber, "COLL-1");
     assert.equal(result.rows[0].billReference, "COLL-BILL");
     assert.equal(result.rows[0].voucherSource, "Voucher Collection");
     assert.equal(result.voucherSource, "Voucher Collection");
-    assert.equal(result.fallbackUsed, false);
+    assert.equal(result.fallbackUsed, true);
     assert.equal(result.warnings.length, 0);
   } finally {
     await mock.close();
@@ -1564,8 +2080,8 @@ test("voucher export accepts empty voucher batches", async () => {
       })
     );
     assert.equal(result.rows.length, 0);
-    assert.equal(result.warnings.length, 0);
-    assert.equal(result.fallbackUsed, false);
+    assert.equal(result.warnings.length >= 1, true);
+    assert.equal(result.fallbackUsed, true);
     assert.equal(result.voucherSource, "Voucher Collection");
   } finally {
     await mock.close();
@@ -1604,6 +2120,101 @@ test("payable aging matches invoice and full payment by bill reference", () => {
   assert.equal(aging[0].exposure43Bh, 0);
 });
 
+test("payable aging includes paid-late invoices as audit evidence", () => {
+  const aging = buildPayableAgingFromVouchers([
+    {
+      ledgerName: "Paid Late Supplier",
+      normalizedLedgerName: "PAID LATE SUPPLIER",
+      date: "2025-04-01",
+      voucherType: "Purchase",
+      voucherNumber: "INV-LATE",
+      billReference: "INV-LATE",
+      credit: 1000,
+      amount: 1000,
+      agreedPaymentDays: 15,
+    },
+    {
+      ledgerName: "Paid Late Supplier",
+      normalizedLedgerName: "PAID LATE SUPPLIER",
+      date: "2025-05-30",
+      voucherType: "Payment",
+      voucherNumber: "PAY-LATE",
+      billReference: "INV-LATE",
+      debit: 1000,
+      amount: 1000,
+    },
+  ], "2026-03-31");
+
+  assert.equal(aging[0].outstandingAmount, 0);
+  assert.equal(aging[0].paidLateInvoiceCount, 1);
+  assert.equal(aging[0].paidLateAmount, 1000);
+  assert.equal(aging[0].paidLateInvoices[0].delayDays, 44);
+  assert.ok(aging[0].interest > 0);
+});
+
+test("payable aging uses 15 days without agreement and acceptance date when available", () => {
+  const aging = buildPayableAgingFromVouchers([
+    {
+      ledgerName: "No Agreement Supplier",
+      normalizedLedgerName: "NO AGREEMENT SUPPLIER",
+      date: "2026-04-01",
+      voucherType: "Purchase",
+      voucherNumber: "NOAGR",
+      billReference: "NOAGR",
+      credit: 1000,
+      amount: 1000,
+    },
+    {
+      ledgerName: "Acceptance Supplier",
+      normalizedLedgerName: "ACCEPTANCE SUPPLIER",
+      date: "2025-04-10",
+      acceptanceDate: "2025-04-20",
+      agreedPaymentDays: 60,
+      voucherType: "Purchase",
+      voucherNumber: "ACCEPT",
+      billReference: "ACCEPT",
+      credit: 1000,
+      amount: 1000,
+    },
+    {
+      ledgerName: "Mixed Agreement Supplier",
+      normalizedLedgerName: "MIXED AGREEMENT SUPPLIER",
+      date: "2025-04-10",
+      acceptanceDate: "2025-04-20",
+      agreedPaymentDays: 60,
+      voucherType: "Purchase",
+      voucherNumber: "MIXED-WITH-AGREEMENT",
+      billReference: "MIXED-WITH-AGREEMENT",
+      credit: 1000,
+      amount: 1000,
+    },
+    {
+      ledgerName: "Mixed Agreement Supplier",
+      normalizedLedgerName: "MIXED AGREEMENT SUPPLIER",
+      date: "2025-05-01",
+      voucherType: "Purchase",
+      voucherNumber: "MIXED-NO-AGREEMENT",
+      billReference: "MIXED-NO-AGREEMENT",
+      credit: 500,
+      amount: 500,
+      raw: { hasWrittenAgreement: false },
+    },
+  ], "2026-06-30");
+  const noAgreement = aging.find((row) => row.vendorName === "No Agreement Supplier").allInvoices[0];
+  const acceptance = aging.find((row) => row.vendorName === "Acceptance Supplier").allInvoices[0];
+  const mixedNoAgreement = aging
+    .find((row) => row.vendorName === "Mixed Agreement Supplier")
+    .allInvoices.find((invoice) => invoice.invoiceNumber === "MIXED-NO-AGREEMENT");
+  assert.equal(noAgreement.allowedPaymentDays, 15);
+  assert.equal(noAgreement.dueDate, "2026-04-16");
+  assert.equal(acceptance.allowedPaymentDays, 45);
+  assert.equal(acceptance.acceptanceDate, "2025-04-20");
+  assert.equal(acceptance.dueDate, "2025-06-04");
+  assert.equal(mixedNoAgreement.hasWrittenAgreement, false);
+  assert.equal(mixedNoAgreement.allowedPaymentDays, 15);
+  assert.equal(mixedNoAgreement.dueDate, "2025-05-16");
+});
+
 test("payable aging computes partial payment, pending amount, overdue days, and 43B(h) exposure", () => {
   const aging = buildPayableAgingFromVouchers([
     {
@@ -1636,7 +2247,7 @@ test("payable aging computes partial payment, pending amount, overdue days, and 
   assert.equal(aging[0].exposure43Bh, 600);
   assert.equal(aging[0].invoices[0].paidAmount, 400);
   assert.equal(aging[0].invoices[0].pendingAmount, 600);
-  assert.equal(aging[0].invoices[0].delayDays, 16);
+  assert.equal(aging[0].invoices[0].delayDays, 46);
 });
 
 test("payable aging keeps ledger outstanding amount and exposes voucher amount separately", () => {
@@ -1718,7 +2329,7 @@ test("report includes only verified MSME vendors", () => {
   assert.equal(rows[0].voucherOutstandingAmount, 1600);
   assert.equal(rows[0].outstandingMismatch, true);
   assert.equal(rows[0].disallowed, 1000);
-  assert.equal(rows[0].delayDays, 15);
+  assert.equal(rows[0].delayDays, 45);
   assert.equal(rows[0].appliedRules.includes("ITA-ACTUAL-PAYMENT-037"), true);
   assert.equal(rows[0].appliedRules.includes("ITA-2025-ACTUAL-PAYMENT-037"), false);
   assert.equal(rows[0].applicableAct, "Income Tax Act, 1961");
@@ -1792,6 +2403,7 @@ test("MCA MSME-1 preview maps report rows to utility buckets and validates PAN",
           ledgerOutstandingAmount: 5000,
           outstandingAmount: 5000,
           daysOutstanding: 80,
+          delayDays: 35,
         },
         {
           vendorName: "Current Supplier",
@@ -1823,6 +2435,15 @@ test("MCA MSME-1 preview maps report rows to utility buckets and validates PAN",
         },
       ],
       excluded: [],
+      schedules: {
+        msmedSection16Interest: [{
+          vendorName: "Overdue Supplier",
+          invoiceNumber: "OD-1",
+          principal: 5000,
+          daysDelayed: 35,
+          interestAmount: 210,
+        }],
+      },
     },
     actor: "unit-test",
   });
@@ -1834,6 +2455,9 @@ test("MCA MSME-1 preview maps report rows to utility buckets and validates PAN",
 
   assert.equal(overdue.outstandingMoreThan45Count, 1);
   assert.equal(overdue.outstandingMoreThan45Amount, 5000);
+  assert.equal(overdue.principalOutstanding, 5000);
+  assert.equal(overdue.delayDays, 35);
+  assert.equal(overdue.section16Interest, 210);
   assert.equal(current.outstanding45OrLessCount, 1);
   assert.equal(current.outstanding45OrLessAmount, 2000);
   assert.equal(paidLate.paidAfter45Count, 1);
@@ -1873,9 +2497,19 @@ test("MCA MSME-1 generation preserves xlsm workbook structure and VBA", () => {
           outstandingMismatch: true,
           outstandingAmount: 572257,
           daysOutstanding: 364,
+          delayDays: 319,
         },
       ],
       excluded: [],
+      schedules: {
+        msmedSection16Interest: [{
+          vendorName: "Workbook Supplier",
+          invoiceNumber: "WB-1",
+          principal: 572257,
+          daysDelayed: 319,
+          interestAmount: 12345,
+        }],
+      },
     },
     actor: "unit-test",
   });
@@ -1891,9 +2525,64 @@ test("MCA MSME-1 generation preserves xlsm workbook structure and VBA", () => {
   assert.equal(workbook.Sheets.MSME.B5.v, "Workbook Supplier");
   assert.equal(workbook.Sheets.MSME.C5.v, "ABCDE1234F");
   assert.equal(workbook.Sheets.MSME.M5.v, 572257);
+  assert.equal(workbook.Sheets.MSME.O5.v, 12345);
+  assert.equal(workbook.Sheets.MSME.P5.v, 572257);
+  assert.equal(workbook.Sheets.MSME.Q5.v, 319);
 });
 
-test("rule engine applies MSME 45-day and actual payment rules", () => {
+test("MCA MSME-1 Excel upload parser and XML generator validate supplier rows", () => {
+  const latestReport = reportRepository.listReports()[0];
+  assert.ok(latestReport, "A report fixture must exist before MCA XML test");
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.json_to_sheet([{
+    "Supplier Name": "XML Supplier",
+    "PAN": "ABCDE1234F",
+    "Udyam Number": "UDYAM-DL-01-1234567",
+    "Paid >45 Amount": 1000,
+    "Outstanding >45 Amount": 500,
+    "Principal Outstanding": 500,
+    "Delay Days": 60,
+    "Section 16 Interest": 75,
+    "Reason For Delay": "Pending reconciliation with supplier",
+  }]);
+  XLSX.utils.book_append_sheet(workbook, sheet, "MSME");
+  const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+  const uploaded = mcaMsme1Service.uploadExcel({
+    reportId: latestReport.id,
+    fileName: "mca-upload.xlsx",
+    contentBase64: buffer.toString("base64"),
+    companyDetails: { cin: "U12345DL2020PLC123456", companyName: "Test Company" },
+    fiscalYear: latestReport.fiscalYear,
+    halfYear: "oct-mar",
+    actor: "unit-test",
+  });
+  assert.equal(uploaded.validation.valid, true);
+  assert.equal(uploaded.rows[0].supplierName, "XML Supplier");
+  const xml = mcaMsme1Service.generateXml({
+    filingId: uploaded.filing.id,
+    companyDetails: { cin: "U12345DL2020PLC123456", companyName: "Test Company" },
+    actor: "unit-test",
+  });
+  assert.equal(xml.generated, true);
+  const xmlPath = mcaMsme1Service.xmlDownloadPath(xml.generationId);
+  const xmlText = fs.readFileSync(xmlPath, "utf8");
+  assert.match(xmlText, /<MCA_MSME_FORM_1>/);
+  assert.match(xmlText, /<PrincipalOutstanding>500\.00<\/PrincipalOutstanding>/);
+  assert.match(xmlText, /<DelayDays>60<\/DelayDays>/);
+  assert.match(xmlText, /<Section16Interest>75\.00<\/Section16Interest>/);
+  fs.unlinkSync(xmlPath);
+
+  const invalid = mcaMsme1Service.validateMcaSupplierRows(
+    [{ supplierName: "Invalid Supplier", amountPaidAfter45: 100 }],
+    { cin: "U12345DL2020PLC123456", companyName: "Test Company" },
+    { fiscalYear: "2025-26", halfYear: "oct-mar" }
+  );
+  assert.equal(invalid.valid, false);
+  assert.ok(invalid.errors.some((error) => error.field === "panNumber"));
+  assert.ok(invalid.errors.some((error) => error.field === "reasonForDelay"));
+});
+
+test("rule engine applies MSME 15-day no-agreement and actual payment rules", () => {
   const result = evaluateVendor({
     party: "Rule Vendor",
     outstandingAmount: 10000,
@@ -1901,8 +2590,8 @@ test("rule engine applies MSME 45-day and actual payment rules", () => {
     vendorMaster: { isMSME: true, udyamStatus: "verified" },
   });
   assert.equal(result.eligible, true);
-  assert.equal(result.allowedPaymentDays, 45);
-  assert.equal(result.delayDays, 30);
+  assert.equal(result.allowedPaymentDays, 15);
+  assert.equal(result.delayDays, 60);
   assert.equal(result.disallowed, 10000);
   assert.equal(result.appliedRules.includes("MSME-PAYMENT-DUE-015"), true);
   assert.equal(result.appliedRules.includes("ITA-ACTUAL-PAYMENT-037"), true);
@@ -1970,10 +2659,10 @@ test("MSME interest calculator returns zero interest when there is no delay", ()
   const result = calculateMSMEInterest({
     principal: 10000,
     invoiceDate: "2026-04-01",
-    asOnDate: "2026-04-30",
+    asOnDate: "2026-04-10",
   });
-  assert.equal(result.daysOutstanding, 29);
-  assert.equal(result.allowedPaymentDays, 45);
+  assert.equal(result.daysOutstanding, 9);
+  assert.equal(result.allowedPaymentDays, 15);
   assert.equal(result.delayDays, 0);
   assert.equal(result.interest, 0);
   assert.equal(result.totalPayable, 10000);
@@ -1987,12 +2676,13 @@ test("MSME interest calculator compounds interest with monthly rests after 45 da
     asOnDate: "2026-06-15",
   });
   assert.equal(result.daysOutstanding, 75);
-  assert.equal(result.delayDays, 30);
+  assert.equal(result.allowedPaymentDays, 15);
+  assert.equal(result.delayDays, 60);
   assert.equal(result.bankRatePercent, 5.5);
   assert.equal(result.annualInterestRate, 0.165);
   assert.equal(result.annualInterestRatePercent, 16.5);
-  assert.equal(result.interest, 137.5);
-  assert.equal(result.totalPayable, 10137.5);
+  assert.equal(result.interest, 276.89);
+  assert.equal(result.totalPayable, 10276.89);
   assert.equal(result.isDelayed, true);
 });
 
@@ -2008,7 +2698,7 @@ test("MSME interest calculator honors configured RBI bank rate", () => {
     assert.equal(result.bankRatePercent, 6.5);
     assert.equal(result.annualInterestRate, 0.195);
     assert.equal(result.annualInterestRatePercent, 19.5);
-    assert.equal(result.interest, 162.5);
+    assert.equal(result.interest, 327.64);
   } finally {
     env.msmeBankRatePercent = oldRate;
   }
@@ -2416,6 +3106,106 @@ test("Excel Udyam import preserves valid number when portal needs manual review"
   assert.match(vendor.udyamRemarks, /captcha/i);
 });
 
+test("Excel Udyam import verifies through fallback by PAN when live portal fails", async () => {
+  const oldFallbackPath = env.udyamFallbackDataPath;
+  const fallbackDir = path.join(__dirname, "..", "data", "test-fallback-pan");
+  fs.mkdirSync(fallbackDir, { recursive: true });
+  const workbookPath = path.join(fallbackDir, "Udyam_no.xlsx");
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    workbook,
+    XLSX.utils.aoa_to_sheet([
+      ["Vendor Name", "Udyam Number", "Payment Terms", "PAN no", "Enterprise Type"],
+      ["Registered PAN Supplier", "UDYAM-DL-01-1111111", "45 days", "ABCDE1234F", "Small"],
+    ]),
+    "Udyam Import"
+  );
+  XLSX.writeFile(workbook, workbookPath);
+
+  env.udyamFallbackDataPath = fallbackDir;
+  udyamFallbackService.loadFallbackData(true);
+  try {
+    const summary = await vendorRepository.importUdyamRowsWithVerification(
+      [{ vendorName: "Ledger Alias Supplier", udyamNumber: "UDYAM-DL-01-2222222", paymentTerms: "45", panNumber: "ABCDE1234F" }],
+      "unit-test",
+      {
+        verifyUdyamNumber: async (udyamNumber) => ({
+          udyamNumber,
+          verified: false,
+          verificationStatus: "manual_fallback_required",
+          error: "Portal unavailable",
+        }),
+      }
+    );
+
+    assert.equal(summary.verified, 1);
+    assert.equal(summary.fallbackVerified, 1);
+    const vendor = vendorRepository.findByNormalizedName("LEDGER ALIAS SUPPLIER");
+    assert.equal(vendor.isMSME, true);
+    assert.equal(vendor.udyamStatus, "verified");
+    assert.equal(vendor.verificationSource, "fallback_upload");
+    assert.equal(vendor.udyamNumber, "UDYAM-DL-01-1111111");
+    assert.equal(vendor.enterpriseType, "Small");
+  } finally {
+    env.udyamFallbackDataPath = oldFallbackPath;
+    udyamFallbackService.loadFallbackData(true);
+  }
+});
+
+test("Udyam fallback matches evidence-only PDF filenames by compact vendor name", () => {
+  const oldFallbackPath = env.udyamFallbackDataPath;
+  const fallbackDir = path.join(__dirname, "..", "data", "test-fallback-pdf");
+  fs.mkdirSync(fallbackDir, { recursive: true });
+  fs.writeFileSync(path.join(fallbackDir, "hlsl.pdf"), "%PDF-1.4\n");
+
+  env.udyamFallbackDataPath = fallbackDir;
+  udyamFallbackService.loadFallbackData(true);
+  try {
+    const match = udyamFallbackService.findFallback({
+      vendorName: "H L S L Services Private Limited",
+      udyamNumber: "UDYAM-DL-01-3333333",
+    });
+    assert.equal(match.matchedBy, "vendor_name");
+    assert.match(match.evidencePath, /hlsl\.pdf$/i);
+    assert.equal(match.enterpriseType, "Micro");
+  } finally {
+    env.udyamFallbackDataPath = oldFallbackPath;
+    udyamFallbackService.loadFallbackData(true);
+  }
+});
+
+test("Excel Udyam import keeps failed live verification out of verified MSME report path", async () => {
+  const oldFallbackPath = env.udyamFallbackDataPath;
+  const emptyFallbackDir = path.join(__dirname, "..", "data", "test-fallback-empty");
+  fs.mkdirSync(emptyFallbackDir, { recursive: true });
+  env.udyamFallbackDataPath = emptyFallbackDir;
+  udyamFallbackService.loadFallbackData(true);
+  try {
+    const summary = await vendorRepository.importUdyamRowsWithVerification(
+      [{ vendorName: "No Fallback Supplier", udyamNumber: "UDYAM-MH-27-7654321", paymentTerms: "45" }],
+      "unit-test",
+      {
+        verifyUdyamNumber: async (udyamNumber) => ({
+          udyamNumber,
+          verified: false,
+          verificationStatus: "manual_fallback_required",
+          error: "Portal unavailable",
+        }),
+      }
+    );
+
+    assert.equal(summary.verified, 0);
+    assert.equal(summary.manualReview, 1);
+    const vendor = vendorRepository.findByNormalizedName("NO FALLBACK SUPPLIER");
+    assert.equal(vendor.isMSME, false);
+    assert.equal(vendor.udyamStatus, "manual_fallback_required");
+    assert.equal(vendor.actionStatus, "manual_review");
+  } finally {
+    env.udyamFallbackDataPath = oldFallbackPath;
+    udyamFallbackService.loadFallbackData(true);
+  }
+});
+
 test("Udyam import verification emits live activity events", async () => {
   const events = [];
   const summary = await vendorRepository.importUdyamRowsWithVerification(
@@ -2473,6 +3263,93 @@ test("purchase invoice repository stores invoice intake records", () => {
   assert.equal(invoice.normalizedVendorName, "INVOICE VENDOR");
   assert.equal(invoice.outstandingAmount, 900);
   assert.equal(purchaseInvoiceRepository.listInvoices({ query: "PI-001" }).length, 1);
+});
+
+test("tax audit schema loader exposes official 3CA and 3CB roots", () => {
+  const threeCa = taxAuditSchemaService.metadata("3CA");
+  const threeCb = taxAuditSchemaService.metadata("3CB");
+  assert.equal(threeCa.rootKey, "FORM3CA");
+  assert.equal(threeCb.rootKey, "FORM3CB");
+  assert.ok(threeCa.allowedFields.reportBody.includes("PartA"));
+  assert.ok(threeCb.allowedFields.reportBody.includes("Form3cdUnpaidStrySec43b"));
+});
+
+test("tax audit report builds schema-aligned 3CB JSON and MSME clause totals", () => {
+  const runId = importRepository.createRun({
+    fiscalYear: "2025-26",
+    fromDate: "2025-04-01",
+    toDate: "2026-03-31",
+    asOn: "2026-03-31",
+    companyName: "Tax Audit Test Co",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, { summary: { fiscalYear: "2025-26", companyName: "Tax Audit Test Co" }, creditors: [], ledgerVouchers: [] });
+  const msmeReport = reportRepository.createReport({
+    importRunId: runId,
+    fiscalYear: "2025-26",
+    summary: { selectedFinancialYear: "2025-26", totalDisallowed: 1000 },
+    report: {
+      included: [],
+      excluded: [],
+      schedules: {
+        clause22Computation: [{
+          supplier: "MSME Vendor",
+          totalPurchasesFromMicroSmall: 2500,
+          amountPaidDuringYear: 1500,
+          clause22iiiBOutstandingDisallowance: 1000,
+          interestUnderSection16: 120,
+        }],
+        clause43BhFromClause22: [{
+          supplier: "MSME Vendor",
+          vendorName: "MSME Vendor",
+          principalDisallowance: 1000,
+          sourceClause: "Clause 22(iii)(b)",
+          allowedInYear: "Year of actual payment",
+        }],
+      },
+    },
+    actor: "unit-test",
+  });
+  let taxReport = taxAuditReportService.createReport({ msmeReportId: msmeReport.id, formType: "3CB", actor: "unit-test" });
+  taxReport = taxAuditReportService.updateDetails(taxReport.id, "assessee", {
+    name: "Tax Audit Test Co",
+    pan: "ABCDE1234F",
+    address: "1 Test Street",
+    city: "Mumbai",
+    stateCode: 27,
+    pinCode: 400001,
+    status: "Company",
+    statusCode: 5,
+  }, "unit-test");
+  taxReport = taxAuditReportService.updateDetails(taxReport.id, "auditor", {
+    caName: "Audit User",
+    firmName: "Audit Firm",
+    membershipNumber: "123456",
+    frn: "123456W",
+    address: "2 Audit Street",
+    city: "Mumbai",
+    stateCode: 27,
+    pinCode: 400002,
+    place: "Mumbai",
+    date: "2026-03-31",
+  }, "unit-test");
+  const payload = taxAuditReportService.buildOfficialJson(taxReport.id);
+  assert.ok(payload.FORM3CB.F3CB);
+  assert.equal(payload.FORM3CB.F3CB.Form3cdUnpaidStrySec43b[0].Amount, 1000);
+  const refreshed = taxAuditReportService.getReport(taxReport.id);
+  assert.equal(refreshed.clauses.find((clause) => clause.clauseNo === "22").amount, 1000);
+  assert.equal(refreshed.clauses.find((clause) => clause.clauseNo === "26").amount, 1000);
+  assert.equal(refreshed.annexures.find((item) => item.annexureType === "clause26").sourceSchedule, "schedules.clause43BhFromClause22");
+  assert.equal(refreshed.validation.filter((item) => item.severity === "error").length, 0);
+});
+
+test("tax audit clause edit creates audit trail and rejects unknown schema fields", () => {
+  const invalid = taxAuditSchemaService.validateJson("3CA", { FORM3CA: { F3CA: { UnknownField: true } } });
+  assert.equal(invalid.valid, false);
+  assert.ok(invalid.errors.some((error) => error.code === "SCHEMA_UNKNOWN_FIELD" || error.code === "SCHEMA_REQUIRED"));
+  const report = taxAuditReportService.listReports()[0];
+  const updated = taxAuditReportService.updateClause(report.id, "10", { remarks: "Reviewed nature of business", reviewStatus: "reviewed" }, "unit-test", "unit test edit");
+  assert.ok(updated.editLog.some((entry) => entry.fieldName === "remarks" && entry.comment === "unit test edit"));
 });
 
 test.after(() => {

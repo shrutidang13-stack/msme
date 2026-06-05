@@ -1,8 +1,7 @@
 const {
-  DEFAULT_ALLOWED_DAYS,
   getConfiguredBankRatePercent,
   getDefaultAnnualInterestRate,
-  compoundMonthlyInterest,
+  calculateInvoiceInterest,
 } = require("./msmeRuleEngine.service");
 
 function parseDate(value, fieldName) {
@@ -44,13 +43,22 @@ function calculateMSMEInterest(input = {}) {
 
   const invoiceDate = parseDate(input.invoiceDate, "invoiceDate");
   const asOnDate = parseDate(input.asOnDate || input.paymentDate, "asOnDate");
-  const agreedDays = Number(input.agreedPaymentDays || 0);
-  const allowedPaymentDays = agreedDays > 0 ? Math.min(agreedDays, DEFAULT_ALLOWED_DAYS) : DEFAULT_ALLOWED_DAYS;
-  const daysOutstanding = daysBetween(invoiceDate, asOnDate);
-  const delayDays = Math.max(daysOutstanding - allowedPaymentDays, 0);
   const annualInterestRate = normalizeAnnualRate(input.annualInterestRate);
   const bankRatePercent = getConfiguredBankRatePercent();
-  const interest = compoundMonthlyInterest(principal, delayDays, annualInterestRate);
+  const due = calculateInvoiceInterest({
+    invoiceDate: input.invoiceDate,
+    acceptanceDate: input.acceptanceDate,
+    deemedAcceptanceDate: input.deemedAcceptanceDate,
+    hasWrittenAgreement: input.hasWrittenAgreement === true || input.hasWrittenAgreement === "true",
+    agreedPaymentDays: input.agreedPaymentDays,
+    agreementEvidence: input.agreementEvidence || input.agreementEvidenceLink,
+    principal,
+    amount: principal,
+    interestPrincipal: principal,
+    paymentDate: input.paymentDate || "",
+    asOnDate: input.asOnDate || input.paymentDate,
+  }, {}, { asOnDate: input.asOnDate || input.paymentDate, bankRatePercent, annualInterestRate });
+  const daysOutstanding = daysBetween(invoiceDate, asOnDate);
 
   return {
     vendorName: input.vendorName || "",
@@ -58,15 +66,23 @@ function calculateMSMEInterest(input = {}) {
     invoiceDate: invoiceDate.toISOString().slice(0, 10),
     asOnDate: asOnDate.toISOString().slice(0, 10),
     daysOutstanding,
-    allowedPaymentDays,
-    delayDays,
+    acceptanceDate: due.acceptanceDate,
+    deemedAcceptanceDate: due.deemedAcceptanceDate,
+    baseDate: due.baseDate,
+    baseDateSource: due.baseDateSource,
+    allowedPaymentDays: due.allowedPaymentDays,
+    appointedDay: due.appointedDay,
+    interestStartDate: due.interestStartDate,
+    delayDays: due.delayDays,
     bankRatePercent,
     annualInterestRate,
     annualInterestRatePercent: roundMoney(annualInterestRate * 100),
-    interest,
-    totalPayable: roundMoney(principal + interest),
-    isDelayed: delayDays > 0,
-    legalNote: delayDays > 0
+    interest: due.interest,
+    totalPayable: roundMoney(principal + due.interest),
+    isDelayed: due.delayDays > 0,
+    verificationRequired: due.verificationRequired,
+    verificationFlags: due.verificationFlags,
+    legalNote: due.delayDays > 0
       ? "MSME delayed-payment interest is calculated with monthly rests after the allowed payment period."
       : "No MSME delayed-payment interest applies because the invoice is within the allowed payment period.",
   };

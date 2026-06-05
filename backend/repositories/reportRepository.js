@@ -26,6 +26,7 @@ function mapReport(row) {
     summary: parseJson(row.summary_json, {}),
     report: included,
     excluded,
+    schedules: Array.isArray(payload) ? {} : payload.schedules || {},
     createdBy: row.created_by || "",
     createdAt: row.created_at,
   };

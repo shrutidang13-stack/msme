@@ -6,6 +6,7 @@ const db = require("../config/database");
 const importRepository = require("../repositories/importRepository");
 const reportRepository = require("../repositories/reportRepository");
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
+const { buildMcaMsme1Xml, validateMcaXmlPayload } = require("./mcaMsme1Xml.service");
 
 const TEMPLATE_PATH = path.resolve(process.cwd(), "backend/templates/MSME_Excel_Layout.xlsm");
 const OUTPUT_DIR = path.resolve(process.cwd(), "backend/storage/mca-msme1");
@@ -161,6 +162,10 @@ function emptyMcaRow(row, index, reason) {
     outstanding45OrLessAmount: 0,
     outstandingMoreThan45Count: 0,
     outstandingMoreThan45Amount: 0,
+    principalOutstanding: Number(row.ledgerOutstandingAmount ?? row.outstandingAmount ?? 0),
+    delayDays: Number(row.delayDays ?? row.daysOutstanding ?? 0),
+    section16Interest: 0,
+    section16InterestBreakup: [],
     reason,
     source: {
       ledgerOutstandingAmount: Number(row.ledgerOutstandingAmount ?? row.outstandingAmount ?? 0),
@@ -186,11 +191,48 @@ function totalsForRows(rows) {
       "outstanding45OrLessAmount",
       "outstandingMoreThan45Count",
       "outstandingMoreThan45Amount",
+      "section16Interest",
     ]) {
       acc[key] = roundMoney((acc[key] || 0) + Number(row[key] || 0));
     }
     return acc;
   }, {});
+}
+
+function supplierRowForDb(row = {}) {
+  return {
+    supplierName: row.supplierName || row.vendorName || "",
+    panNumber: row.panNumber || "",
+    udyamNumber: row.udyamNumber || row.source?.udyamNumber || "",
+    amountPaidWithin45: roundMoney(Number(row.amountPaidWithin45 ?? row.paidWithin45OtherAmount ?? 0) + Number(row.paidWithin45TredsAmount ?? 0)),
+    amountPaidAfter45: roundMoney(row.amountPaidAfter45 ?? row.paidAfter45Amount ?? 0),
+    outstanding45OrLess: roundMoney(row.outstanding45OrLess ?? row.outstanding45OrLessAmount ?? 0),
+    outstandingMoreThan45: roundMoney(row.outstandingMoreThan45 ?? row.outstandingMoreThan45Amount ?? 0),
+    principalOutstanding: roundMoney(row.principalOutstanding ?? row.source?.ledgerOutstandingAmount ?? row.outstandingMoreThan45Amount ?? row.outstanding45OrLessAmount ?? 0),
+    delayDays: Number(row.delayDays ?? row.source?.delayDays ?? row.source?.daysOutstanding ?? 0),
+    section16Interest: roundMoney(row.section16Interest || 0),
+    reasonForDelay: row.reasonForDelay || row.reason || "",
+    serialNumber: Number(row.serialNumber || 0),
+    raw: row,
+  };
+}
+
+function validateMcaSupplierRows(rows = [], companyDetails = {}, period = {}) {
+  const normalized = rows.map(supplierRowForDb);
+  const payloadValidation = validateMcaXmlPayload({
+    companyDetails,
+    fiscalYear: period.fiscalYear || period.fiscal_year || "2025-26",
+    halfYear: period.halfYear || period.half_year || "oct-mar",
+    supplierRows: normalized,
+  });
+  const warnings = [];
+  if (normalized.length > MAX_UTILITY_ROWS) payloadValidation.errors.push({ field: "rows", message: `MCA utility supports up to ${MAX_UTILITY_ROWS} supplier rows.` });
+  normalized.forEach((row, index) => {
+    for (const key of ["amountPaidWithin45", "amountPaidAfter45", "outstanding45OrLess", "outstandingMoreThan45"]) {
+      if (Number(row[key] || 0) < 0) payloadValidation.errors.push({ row: index + 1, field: key, message: "Amount must be non-negative." });
+    }
+  });
+  return { valid: payloadValidation.errors.length === 0, errors: payloadValidation.errors, warnings, rows: normalized };
 }
 
 function validateRows(rows) {
@@ -217,6 +259,13 @@ function buildPreview({ reportId, halfYear = "oct-mar", reasonOverrides = {} }) 
   if (!run) throw new Error("Import run not found");
   const range = halfYearRange(report.fiscalYear, halfYear);
   const paidBuckets = buildPaidBuckets(importRepository.getAllLedgerVouchers(report.importRunId), range);
+  const interestByVendor = new Map();
+  for (const row of report.schedules?.msmedSection16Interest || report.schedules?.interestCalculation || []) {
+    const normalized = normalizeVendorName(row.vendorName || row.supplier || "");
+    if (!normalized) continue;
+    if (!interestByVendor.has(normalized)) interestByVendor.set(normalized, []);
+    interestByVendor.get(normalized).push(row);
+  }
 
   const rows = (report.report || [])
     .map((row, index) => {
@@ -228,6 +277,9 @@ function buildPreview({ reportId, halfYear = "oct-mar", reasonOverrides = {} }) 
       mcaRow.paidWithin45OtherAmount = paid.paidWithin45OtherAmount || 0;
       mcaRow.paidAfter45Count = paid.paidAfter45Count || 0;
       mcaRow.paidAfter45Amount = paid.paidAfter45Amount || 0;
+      const interestBreakup = interestByVendor.get(normalizedVendorName) || [];
+      mcaRow.section16InterestBreakup = interestBreakup;
+      mcaRow.section16Interest = roundMoney(interestBreakup.reduce((sum, item) => sum + Number(item.interestAmount || 0), 0));
       const ledgerOutstanding = roundMoney(row.ledgerOutstandingAmount ?? row.outstandingAmount ?? 0);
       if (ledgerOutstanding > 0) {
         if (Number(row.daysOutstanding || 0) <= 45) {
@@ -244,7 +296,8 @@ function buildPreview({ reportId, halfYear = "oct-mar", reasonOverrides = {} }) 
       row.paidWithin45OtherAmount > 0 ||
       row.paidAfter45Amount > 0 ||
       row.outstanding45OrLessAmount > 0 ||
-      row.outstandingMoreThan45Amount > 0
+      row.outstandingMoreThan45Amount > 0 ||
+      row.section16Interest > 0
     )
     .map((row, index) => ({ ...row, serialNumber: index + 1 }));
 
@@ -291,8 +344,14 @@ function populateWorkbook(preview, outputPath) {
     writeCell(sheet, `L${excelRow}`, row.outstandingMoreThan45Count);
     writeCell(sheet, `M${excelRow}`, row.outstandingMoreThan45Amount);
     writeCell(sheet, `N${excelRow}`, row.reason);
+    writeCell(sheet, `O${excelRow}`, row.section16Interest);
+    writeCell(sheet, `P${excelRow}`, row.principalOutstanding);
+    writeCell(sheet, `Q${excelRow}`, row.delayDays);
   });
-  sheet["!ref"] = "A1:N100003";
+  sheet["O4"] = { t: "s", v: "Section 16 Interest (working)" };
+  sheet["P4"] = { t: "s", v: "Principal Outstanding (working)" };
+  sheet["Q4"] = { t: "s", v: "Delay Days (working)" };
+  sheet["!ref"] = "A1:Q100003";
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   XLSX.writeFile(workbook, outputPath, { bookType: "xlsm", bookVBA: true, cellStyles: true });
 }
@@ -347,6 +406,7 @@ function saveFiling({ preview, status, outputPath = "", actor = "unknown", mcaUs
     actor,
     nowIso()
   );
+  saveMcaSupplierRows(id, preview.rows);
   return getFiling(id);
 }
 
@@ -405,6 +465,177 @@ function downloadPath(id) {
   return filing.generatedFilePath;
 }
 
+function saveMcaSupplierRows(filingId, rows = []) {
+  const normalizedRows = rows.map(supplierRowForDb);
+  const validationByIndex = validateMcaSupplierRows(normalizedRows, { cin: "TEMP", companyName: "TEMP" }, { fiscalYear: "2025-26", halfYear: "oct-mar" });
+  const tx = db.transaction(() => {
+    db.prepare("DELETE FROM mca_msme1_supplier_rows WHERE filing_id = ?").run(filingId);
+    const insert = db.prepare(`
+      INSERT INTO mca_msme1_supplier_rows (
+        id, filing_id, serial_number, supplier_name, pan_number, udyam_number,
+        amount_paid_within_45, amount_paid_after_45, outstanding_45_or_less, outstanding_more_than_45,
+        reason_for_delay, validation_status, validation_errors_json, raw_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    normalizedRows.forEach((row, index) => {
+      const rowErrors = (validationByIndex.errors || []).filter((error) => error.row === index + 1);
+      insert.run(
+        crypto.randomUUID(),
+        filingId,
+        row.serialNumber || index + 1,
+        row.supplierName,
+        row.panNumber,
+        row.udyamNumber,
+        row.amountPaidWithin45,
+        row.amountPaidAfter45,
+        row.outstanding45OrLess,
+        row.outstandingMoreThan45,
+        row.reasonForDelay,
+        rowErrors.length ? "error" : "valid",
+        JSON.stringify(rowErrors),
+        JSON.stringify(row.raw || row)
+      );
+    });
+  });
+  tx();
+  return normalizedRows;
+}
+
+function listMcaSupplierRows(filingId) {
+  return db.prepare("SELECT * FROM mca_msme1_supplier_rows WHERE filing_id = ? ORDER BY serial_number ASC").all(filingId).map((row) => {
+    let raw = {};
+    try {
+      raw = JSON.parse(row.raw_json || "{}");
+    } catch {
+      raw = {};
+    }
+    return {
+      serialNumber: row.serial_number,
+      supplierName: row.supplier_name,
+      panNumber: row.pan_number || "",
+      udyamNumber: row.udyam_number || "",
+      amountPaidWithin45: Number(row.amount_paid_within_45 || 0),
+      amountPaidAfter45: Number(row.amount_paid_after_45 || 0),
+      outstanding45OrLess: Number(row.outstanding_45_or_less || 0),
+      outstandingMoreThan45: Number(row.outstanding_more_than_45 || 0),
+      reasonForDelay: row.reason_for_delay || "",
+      principalOutstanding: Number(raw.principalOutstanding || 0),
+      delayDays: Number(raw.delayDays || 0),
+      section16Interest: Number(raw.section16Interest || 0),
+      validationStatus: row.validation_status,
+    };
+  });
+}
+
+function headerValue(row, names) {
+  const keys = Object.keys(row || {});
+  const normalized = new Map(keys.map((key) => [String(key).trim().toLowerCase(), key]));
+  for (const name of names) {
+    const key = normalized.get(name.toLowerCase());
+    if (key) return row[key];
+  }
+  return "";
+}
+
+function parseUploadedMcaExcel(buffer, metadata = {}) {
+  const workbook = XLSX.read(buffer, { type: "buffer" });
+  const sheet = workbook.Sheets.MSME || workbook.Sheets[workbook.SheetNames[0]];
+  if (!sheet) throw new Error("Uploaded MCA Excel does not contain a readable worksheet.");
+  const rawRows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+  const rows = rawRows
+    .filter((row) => headerValue(row, ["Supplier Name", "vendorName", "Name"]))
+    .map((row, index) => ({
+      serialNumber: Number(headerValue(row, ["S. No.", "Serial Number", "serialNumber"])) || index + 1,
+      supplierName: headerValue(row, ["Supplier Name", "vendorName", "Name"]),
+      panNumber: String(headerValue(row, ["PAN", "PAN Number", "panNumber"]) || "").trim().toUpperCase(),
+      udyamNumber: headerValue(row, ["Udyam Number", "udyamNumber"]),
+      amountPaidWithin45: Number(headerValue(row, ["Paid <=45 Other Amount", "Paid Within 45", "amountPaidWithin45"]) || 0),
+      amountPaidAfter45: Number(headerValue(row, ["Paid >45 Amount", "amountPaidAfter45"]) || 0),
+      outstanding45OrLess: Number(headerValue(row, ["Outstanding <=45 Amount", "outstanding45OrLess"]) || 0),
+      outstandingMoreThan45: Number(headerValue(row, ["Outstanding >45 Amount", "outstandingMoreThan45"]) || 0),
+      principalOutstanding: Number(headerValue(row, ["Principal Outstanding", "principalOutstanding"]) || 0),
+      delayDays: Number(headerValue(row, ["Delay Days", "delayDays"]) || 0),
+      section16Interest: Number(headerValue(row, ["Section 16 Interest", "section16Interest"]) || 0),
+      reasonForDelay: headerValue(row, ["Reason For Delay", "reason", "reasonForDelay"]),
+      raw: row,
+    }));
+  const validation = validateMcaSupplierRows(rows, metadata.companyDetails || {}, metadata);
+  return { rows: validation.rows, validation };
+}
+
+function uploadExcel({ reportId, fileName = "", contentBase64, companyDetails = {}, fiscalYear, halfYear = "oct-mar", actor = "unknown" }) {
+  if (!contentBase64) throw new Error("contentBase64 is required");
+  const report = reportRepository.getReport(reportId);
+  if (!report) throw new Error("reportId is required for uploaded MCA Excel rows");
+  const effectiveFiscalYear = fiscalYear || report.fiscalYear;
+  const buffer = Buffer.from(contentBase64, "base64");
+  const parsed = parseUploadedMcaExcel(buffer, { companyDetails, fiscalYear: effectiveFiscalYear, halfYear });
+  const preview = {
+    reportId: report.id,
+    importRunId: report.importRunId,
+    fiscalYear: effectiveFiscalYear,
+    halfYear,
+    halfYearLabel: halfYearRange(effectiveFiscalYear, halfYear).label,
+    period: halfYearRange(effectiveFiscalYear, halfYear),
+    eligibleRowCount: parsed.rows.length,
+    rows: parsed.rows.map((row, index) => ({ ...row, vendorName: row.supplierName, reason: row.reasonForDelay, serialNumber: index + 1 })),
+    totals: {},
+    validation: parsed.validation,
+    fileName,
+  };
+  const filing = saveFiling({ preview, status: parsed.validation.valid ? "uploaded" : "validation_failed", actor });
+  return { filing, rows: parsed.rows, validation: parsed.validation };
+}
+
+function generateXml({ filingId, companyDetails = {}, actor = "unknown" }) {
+  const filing = getFiling(filingId);
+  if (!filing) throw new Error("MCA MSME-1 filing not found");
+  const rows = listMcaSupplierRows(filingId);
+  const payload = {
+    companyDetails,
+    fiscalYear: filing.fiscalYear,
+    halfYear: filing.halfYear,
+    periodLabel: halfYearRange(filing.fiscalYear, filing.halfYear).label,
+    supplierRows: rows,
+  };
+  const validation = validateMcaXmlPayload(payload);
+  if (!validation.valid) {
+    const id = crypto.randomUUID();
+    db.prepare(`
+      INSERT INTO mca_msme1_xml_generations (id, filing_id, status, xml_file_path, validation_json, generated_by, generated_at)
+      VALUES (?, ?, 'validation_failed', '', ?, ?, ?)
+    `).run(id, filingId, JSON.stringify(validation), actor, nowIso());
+    return { generated: false, validation, generationId: id };
+  }
+  const xml = buildMcaMsme1Xml(payload);
+  fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+  const xmlPath = path.join(OUTPUT_DIR, `MCA_MSME1_${filing.fiscalYear}_${filing.halfYear}_${Date.now()}.xml`);
+  fs.writeFileSync(xmlPath, xml, "utf8");
+  const id = crypto.randomUUID();
+  db.prepare(`
+    INSERT INTO mca_msme1_xml_generations (id, filing_id, status, xml_file_path, validation_json, generated_by, generated_at)
+    VALUES (?, ?, 'xml_generated', ?, ?, ?, ?)
+  `).run(id, filingId, xmlPath, JSON.stringify(validation), actor, nowIso());
+  db.prepare("UPDATE mca_msme1_filings SET status = 'xml_generated' WHERE id = ?").run(filingId);
+  return { generated: true, validation, generationId: id, downloadUrl: `/api/mca/msme1/xml/${id}/download`, filing: getFiling(filingId) };
+}
+
+function xmlDownloadPath(id) {
+  const row = db.prepare("SELECT * FROM mca_msme1_xml_generations WHERE id = ?").get(id);
+  if (!row || !row.xml_file_path || !fs.existsSync(row.xml_file_path)) throw new Error("Generated MCA MSME-1 XML file is missing");
+  return row.xml_file_path;
+}
+
+function validationReport(id) {
+  const filing = getFiling(id);
+  if (!filing) throw new Error("MCA MSME-1 filing not found");
+  return {
+    filing,
+    rows: listMcaSupplierRows(id),
+    validation: filing.validation,
+  };
+}
+
 module.exports = {
   DEFAULT_REASON,
   TEMPLATE_PATH,
@@ -415,5 +646,13 @@ module.exports = {
   recordSrn,
   startUpload,
   downloadPath,
+  parseUploadedMcaExcel,
+  validateMcaSupplierRows,
+  saveMcaSupplierRows,
+  listMcaSupplierRows,
+  uploadExcel,
+  generateXml,
+  xmlDownloadPath,
+  validationReport,
   halfYearRange,
 };

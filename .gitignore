@@ -26,3 +26,7 @@ backend/storage/udyam-failures/*.png
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.log
+backend/storage/tally-diagnostics/
+backend/storage/mca-msme1/*.xlsm
+data05.06.2026msme/

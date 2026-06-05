@@ -3,6 +3,8 @@ const importRepository = require("../repositories/importRepository");
 const vendorRepository = require("../repositories/vendorRepository");
 const { enrichCreditorsWithVoucherAging } = require("./payableAging.service");
 const { attachLedgerMetadata, buildStatementBundle, deriveSundryCreditors } = require("./financialStatements.service");
+const { splitIntoFinancialYearPeriods } = require("../utils/financialYear");
+const { normalizeVendorName } = require("../utils/normalizeVendorName");
 
 function buildVerificationSummary(creditors) {
   const total = creditors.length;
@@ -37,6 +39,18 @@ function healthFailureMessage(health) {
   if (health.serverRunning === false) return health.error || health.message || "Tally server is not running";
   if (health.xmlPostWorking === false) return "Tally server is reachable, but XML export request failed.";
   return null;
+}
+
+function createImportError(message, status = 400) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+function statusForHealthFailure(health) {
+  if (health.reachable === false || health.portOpen === false || health.serverRunning === false) return 503;
+  if (health.xmlPostWorking === false) return 502;
+  return 400;
 }
 
 function expectedDatesForFiscalYear(fiscalYear) {
@@ -80,6 +94,25 @@ function assertImportPeriod({ periodType = "financial_year", fiscalYear, fromDat
   return { fromDate: normalizedFrom, toDate: normalizedTo };
 }
 
+function financialYearPeriodsForImport({ periodType = "financial_year", fiscalYear, fromDate, toDate, asOn, capToAsOn = true }) {
+  const period = assertImportPeriod({ periodType, fiscalYear, fromDate, toDate });
+  const periods = splitIntoFinancialYearPeriods({
+    fromDate: period.fromDate,
+    toDate: period.toDate,
+    asOnDate: normalizeCompactDate(asOn),
+    capToAsOn: Boolean(capToAsOn && asOn),
+  });
+  return periods.length ? periods : [{
+    financialYear: fiscalYear || "custom",
+    fyStartDate: period.fromDate,
+    fyEndDate: period.toDate,
+    reportFromDate: period.fromDate,
+    reportToDate: period.toDate,
+    asOnDate: normalizeCompactDate(asOn),
+    cappedByAsOn: false,
+  }];
+}
+
 function creditorRowsFromDaybook({ ledgerMetadata, ledgerVouchers, asOn }) {
   const creditors = deriveSundryCreditors(ledgerMetadata, ledgerVouchers);
   return creditors.map((creditor) => ({
@@ -120,10 +153,56 @@ function creditorRowsFromDaybook({ ledgerMetadata, ledgerVouchers, asOn }) {
   }));
 }
 
-async function importFromTally({ periodType = "financial_year", fiscalYear, fromDate, toDate, asOn, companyName, actor }) {
+function countCreditorImpactRows(rows = [], creditors = []) {
+  const creditorNames = new Set(
+    creditors
+      .flatMap((creditor) => [
+        creditor.normalizedVendorName,
+        normalizeVendorName(creditor.party || creditor.name || creditor.ledgerName),
+      ])
+      .filter(Boolean)
+  );
+  if (!creditorNames.size) return 0;
+  return rows.filter((row) => {
+    const names = [
+      row.normalizedLedgerName,
+      row.normalizedVendorName,
+      normalizeVendorName(row.ledgerName),
+      normalizeVendorName(row.vendorName),
+      normalizeVendorName(row.partyLedgerName),
+    ].filter(Boolean);
+    return names.some((name) => creditorNames.has(name));
+  }).length;
+}
+
+async function captureBaselineSnapshot({ importRunId, companyName, baselineDate = "2025-03-31" }) {
+  try {
+    const snapshot = await tallyService.fetchLedgerSnapshot({ companyName, asOnDate: baselineDate });
+    const rows = snapshot.ledgers
+      .filter((ledger) => ledger.isSundryCreditor)
+      .map((ledger) => ({
+        baselineDate,
+        vendorName: ledger.name || ledger.ledgerName,
+        ledgerName: ledger.name || ledger.ledgerName,
+        normalizedVendorName: ledger.normalizedName,
+        openingBalance: Number(ledger.openingBalance || 0),
+        closingBalance: Number(ledger.closingBalance || 0),
+        ledgerPayableOutstanding: Math.max(-Number(ledger.closingBalance || 0), 0),
+        panNumber: ledger.panNumber || "",
+        raw: ledger,
+      }));
+    importRepository.saveBaselineSnapshot(importRunId, rows);
+    return { status: "available", baselineDate, rowCount: rows.length, warning: "" };
+  } catch (error) {
+    return { status: "unavailable", baselineDate, rowCount: 0, warning: `Baseline snapshot unavailable: ${error.message}` };
+  }
+}
+
+async function importFromTally({ periodType = "financial_year", fiscalYear, fromDate, toDate, asOn, capToAsOn = true, companyName, actor }) {
   const period = assertImportPeriod({ periodType, fiscalYear, fromDate, toDate });
   const selectedFiscalYear = periodType === "custom" ? (fiscalYear || "custom") : fiscalYear;
   const selectedAsOn = asOn || new Date().toISOString().split("T")[0];
+  const financialYearPeriods = financialYearPeriodsForImport({ periodType, fiscalYear, fromDate, toDate, asOn, capToAsOn });
   const runId = importRepository.createRun({
     fiscalYear: selectedFiscalYear,
     periodType,
@@ -149,19 +228,90 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
       error: health.error,
     });
     const preflightError = healthFailureMessage(health);
-    if (preflightError) throw new Error(preflightError);
+    if (preflightError) throw createImportError(preflightError, statusForHealthFailure(health));
 
     logImportStage("ledgerMetadata", { status: "start", runId });
     const ledgerMetadataResult = await tallyService.fetchLedgerMetadata({ companyName: health.companyName || companyName });
     const selectedCompanyName = ledgerMetadataResult.companyName || health.companyName;
     logImportStage("ledgerMetadata", { status: "success", runId, ledgerCount: ledgerMetadataResult.ledgers.length });
-
-    logImportStage("daybookExport", { status: "start", runId, from: period.fromDate, to: period.toDate });
-    const dayBookResult = await tallyService.fetchAllDayBookVouchers({
-      from: period.fromDate,
-      to: period.toDate,
-      companyName: selectedCompanyName,
+    const metadataCreditorRows = creditorRowsFromDaybook({
+      ledgerMetadata: ledgerMetadataResult.ledgers,
+      ledgerVouchers: [],
+      asOn: selectedAsOn,
     });
+
+    logImportStage("daybookExport", { status: "start", runId, from: period.fromDate, to: period.toDate, financialYearPeriods });
+    const dayBookResults = [];
+    for (const fyPeriod of financialYearPeriods) {
+      logImportStage("daybookExport", { status: "fy_start", runId, financialYear: fyPeriod.financialYear, from: fyPeriod.reportFromDate, to: fyPeriod.reportToDate, cappedByAsOn: fyPeriod.cappedByAsOn });
+      let fyResult = await tallyService.fetchAllDayBookVouchers({
+        from: fyPeriod.reportFromDate,
+        to: fyPeriod.reportToDate,
+        companyName: selectedCompanyName,
+      });
+      const creditorImpactRows = countCreditorImpactRows(fyResult.rows, metadataCreditorRows);
+      if ((fyResult.rows.length === 0 || creditorImpactRows === 0) && metadataCreditorRows.length > 0) {
+        const fallbackReason = fyResult.rows.length === 0
+          ? "Full Day Book returned no parsed voucher rows"
+          : "Full Day Book returned voucher rows, but none matched detected creditor ledgers";
+        logImportStage("daybookExport", {
+          status: "creditor_fallback_start",
+          runId,
+          financialYear: fyPeriod.financialYear,
+          from: fyPeriod.reportFromDate,
+          to: fyPeriod.reportToDate,
+          creditorCount: metadataCreditorRows.length,
+          dayBookRows: fyResult.rows.length,
+          creditorImpactRows,
+          reason: fallbackReason,
+        });
+        const fallbackResult = await tallyService.fetchAllCreditorLedgerVouchers({
+          creditors: metadataCreditorRows,
+          from: fyPeriod.reportFromDate,
+          to: fyPeriod.reportToDate,
+          companyName: selectedCompanyName,
+        });
+        fyResult = {
+          ...fallbackResult,
+          warnings: [
+            ...(fyResult.warnings || []),
+            ...(fallbackResult.warnings || []),
+          ],
+          voucherSource: fallbackResult.voucherSource || fyResult.voucherSource,
+          fallbackUsed: true,
+        };
+        logImportStage("daybookExport", {
+          status: "creditor_fallback_end",
+          runId,
+          financialYear: fyPeriod.financialYear,
+          rows: fyResult.rows.length,
+          voucherSource: fyResult.voucherSource,
+          reason: fallbackReason,
+        });
+      }
+      dayBookResults.push({
+        ...fyResult,
+        period: fyPeriod,
+        rows: fyResult.rows.map((row) => ({
+          ...row,
+          financialYear: fyPeriod.financialYear,
+          fyStartDate: fyPeriod.fyStartDate,
+          fyEndDate: fyPeriod.fyEndDate,
+          reportFromDate: fyPeriod.reportFromDate,
+          reportToDate: fyPeriod.reportToDate,
+          asOnDate: fyPeriod.asOnDate || selectedAsOn,
+        })),
+      });
+      logImportStage("daybookExport", { status: "fy_success", runId, financialYear: fyPeriod.financialYear, rows: fyResult.rows.length });
+    }
+    const mergedDaybookRows = dayBookResults.flatMap((result) => result.rows);
+    const dayBookWarnings = dayBookResults.flatMap((result) => result.warnings || []);
+    const dayBookResult = {
+      rows: mergedDaybookRows,
+      warnings: dayBookWarnings,
+      voucherSource: [...new Set(dayBookResults.map((result) => result.voucherSource).filter(Boolean))].join(" + ") || "Voucher Collection",
+      fallbackUsed: dayBookResults.some((result) => result.fallbackUsed),
+    };
     const ledgerVoucherRows = attachLedgerMetadata(dayBookResult.rows, ledgerMetadataResult.ledgers);
     const statements = buildStatementBundle(ledgerVoucherRows, ledgerMetadataResult.ledgers);
     const data = {
@@ -216,6 +366,11 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
     });
 
     const agedCreditors = enrichCreditorsWithVoucherAging(data.creditors, ledgerVoucherResult.rows, selectedAsOn);
+    const baselineSnapshotStatus = await captureBaselineSnapshot({
+      importRunId: runId,
+      companyName: selectedCompanyName,
+      baselineDate: "2025-03-31",
+    });
     logImportStage("persistImport", { status: "start", runId });
     importRepository.completeRun(runId, {
       summary: {
@@ -226,6 +381,10 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
         fromDate: period.fromDate,
         toDate: period.toDate,
         asOn: selectedAsOn,
+        capToAsOn: Boolean(capToAsOn),
+        financialYears: financialYearPeriods.map((item) => item.financialYear),
+        financialYearPeriods,
+        cappedByAsOn: financialYearPeriods.some((item) => item.cappedByAsOn),
         companyName: selectedCompanyName,
         voucherSource: ledgerVoucherResult.voucherSource,
         fallbackUsed: ledgerVoucherResult.fallbackUsed,
@@ -241,6 +400,7 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
           zeroDebitCreditorsWithActivity: statements.summary.zeroDebitCreditorsWithActivity,
           failedOrTruncatedBatches: ledgerVoucherResult.warnings.length,
         },
+        baselineSnapshot: baselineSnapshotStatus,
         ledgerMetadata: ledgerMetadataResult.ledgers,
       },
       creditors: agedCreditors,
@@ -290,6 +450,7 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
       ledgerVoucherDiagnostics,
       seedSummary,
       warnings: ledgerVoucherResult.warnings,
+      baselineSnapshot: run.summary?.baselineSnapshot || null,
       ignoredNonSundryCount: ignoredNonSundry.length,
       ignoredNonSundrySamples,
       verificationSummary: buildVerificationSummary(creditors),
@@ -301,10 +462,19 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
   }
 }
 
-function getImportRun(id) {
+function getImportRun(id, filters = {}) {
   const run = importRepository.getRun(id);
   if (!run) return null;
-  const creditors = enrichCreditors(importRepository.getCreditors(id));
+  const requestedFinancialYear = String(filters.financialYear || filters.fiscalYear || "").trim();
+  const baseCreditors = enrichCreditors(importRepository.getCreditors(id));
+  const creditors = requestedFinancialYear && requestedFinancialYear !== "all"
+    ? enrichCreditorsWithVoucherAging(
+      baseCreditors,
+      importRepository.getLedgerVouchersForReport(id, { financialYear: requestedFinancialYear }),
+      run.asOn,
+      { preferVoucherOutstanding: true }
+    ).filter((creditor) => Number(creditor.voucherCount || 0) > 0 || Math.abs(Number(creditor.outstandingAmount || 0)) > 0)
+    : baseCreditors;
   const ignoredNonSundry = importRepository.getIgnoredNonSundryCreditors(id);
   return {
     importRun: {
@@ -320,6 +490,12 @@ function getImportRun(id) {
   };
 }
 
+function getLatestCompletedImportRun(filters = {}) {
+  const latest = importRepository.getLatestCompletedRun();
+  if (!latest) return null;
+  return getImportRun(latest.id, filters);
+}
+
 function seedVendorMasterFromImport(importRunId, actor = "unknown") {
   const run = importRepository.getRun(importRunId);
   if (!run) throw new Error("Import run not found");
@@ -330,8 +506,13 @@ function seedVendorMasterFromImport(importRunId, actor = "unknown") {
 function getLedgerVouchers(importRunId, filters = {}) {
   const run = importRepository.getRun(importRunId);
   if (!run) return null;
-  if (filters.fiscalYear && filters.fiscalYear !== run.fiscalYear) {
-    throw new Error(`Import run fiscal year mismatch. Requested ${filters.fiscalYear}, but run belongs to ${run.fiscalYear}.`);
+  const requestedFinancialYear = filters.financialYear || filters.fiscalYear;
+  const availableFinancialYears = run.summary?.financialYears || [];
+  if (requestedFinancialYear && requestedFinancialYear !== "all" && run.fiscalYear !== "custom" && requestedFinancialYear !== run.fiscalYear) {
+    throw new Error(`Import run fiscal year mismatch. Requested ${requestedFinancialYear}, but run belongs to ${run.fiscalYear}.`);
+  }
+  if (requestedFinancialYear && requestedFinancialYear !== "all" && run.fiscalYear === "custom" && availableFinancialYears.length && !availableFinancialYears.includes(requestedFinancialYear)) {
+    throw new Error(`Import run does not contain financial year ${requestedFinancialYear}.`);
   }
   logImportStage("voucherQuery", { status: "start", importRunId, fiscalYear: run.fiscalYear });
   return {
@@ -353,10 +534,10 @@ function ledgerMetadataForRun(run) {
   return Array.isArray(run?.summary?.ledgerMetadata) ? run.summary.ledgerMetadata : [];
 }
 
-function getStatement(importRunId, type) {
+function getStatement(importRunId, type, filters = {}) {
   const run = importRepository.getRun(importRunId);
   if (!run) return null;
-  const rows = importRepository.getAllDaybookVouchers(importRunId);
+  const rows = importRepository.getLedgerVouchersForReport(importRunId, filters);
   const metadata = ledgerMetadataForRun(run);
   const bundle = buildStatementBundle(rows, metadata);
   const statement = type === "trial-balance"
@@ -371,7 +552,9 @@ function getStatement(importRunId, type) {
 
 module.exports = {
   importFromTally,
+  captureBaselineSnapshot,
   getImportRun,
+  getLatestCompletedImportRun,
   getLedgerVouchers,
   getDaybook,
   getStatement,
@@ -380,4 +563,5 @@ module.exports = {
   enrichCreditors,
   expectedDatesForFiscalYear,
   assertImportPeriod,
+  financialYearPeriodsForImport,
 };

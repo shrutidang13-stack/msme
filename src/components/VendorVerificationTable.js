@@ -16,6 +16,9 @@ const statusStyles = {
 
 function statusLabel(vendor) {
   const status = vendor.vendorMaster?.udyamStatus || vendor.vendorMaster?.verificationStatus || "pending";
+  const source = vendor.vendorMaster?.verificationSource;
+  if (status === "verified" && source === "live_portal") return "Live Portal Verified";
+  if (status === "verified" && source === "fallback_upload") return "Fallback Data Used";
   if (status === "verified") return "Verified";
   if (status === "approved") return "Approved";
   if (status === "manual_fallback_required") return "Manual Fallback";
@@ -26,6 +29,22 @@ function statusLabel(vendor) {
   if (status === "not_required" || status === "not_required_zero_outstanding") return "Not Required";
   if (status === "failed") return "Failed";
   return "Pending";
+}
+
+function sourceLabel(source) {
+  if (source === "live_portal") return "Live portal";
+  if (source === "fallback_upload") return "Fallback backend data";
+  if (source === "manual_review") return "Manual review";
+  if (source === "udyam_excel_import") return "Excel import";
+  if (source === "manual") return "Manual";
+  return source || "Not fetched";
+}
+
+function sourceStyle(source) {
+  if (source === "live_portal") return "bg-green-50 text-green-700 border-green-200";
+  if (source === "fallback_upload") return "bg-blue-50 text-blue-700 border-blue-200";
+  if (source === "manual_review") return "bg-yellow-50 text-yellow-700 border-yellow-200";
+  return "bg-gray-50 text-gray-600 border-gray-200";
 }
 
 export default function VendorVerificationTable({
@@ -101,6 +120,7 @@ export default function VendorVerificationTable({
               <th className="text-left p-2 text-gray-600">Udyam Number</th>
               <th className="text-left p-2 text-gray-600">Enterprise Type</th>
               <th className="text-left p-2 text-gray-600">Verification Status</th>
+              <th className="text-left p-2 text-gray-600">Data Source</th>
               <th className="text-left p-2 text-gray-600">Action</th>
             </tr>
           </thead>
@@ -161,6 +181,14 @@ export default function VendorVerificationTable({
                       <p className="text-[11px] text-gray-500 mt-1">
                         {new Date(vendor.vendorMaster.lastVerifiedAt).toLocaleString("en-IN")}
                       </p>
+                    )}
+                  </td>
+                  <td className="p-2">
+                    <span className={`inline-block px-2 py-1 rounded-full border text-[11px] font-bold ${sourceStyle(vendor.vendorMaster?.verificationSource)}`}>
+                      {sourceLabel(vendor.vendorMaster?.verificationSource)}
+                    </span>
+                    {vendor.vendorMaster?.udyamRemarks && (
+                      <p className="text-[11px] text-gray-500 mt-1 max-w-48">{vendor.vendorMaster.udyamRemarks}</p>
                     )}
                   </td>
                   <td className="p-2">

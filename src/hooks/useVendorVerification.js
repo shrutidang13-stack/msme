@@ -112,7 +112,7 @@ export function useVendorVerification() {
     setVerifyingRows((prev) => ({ ...prev, [vendor.name]: true }));
     try {
       const response = await verifyUdyam(
-        { vendorName: vendor.name, udyamNumber: draft.udyamNumber },
+        { vendorName: vendor.name, udyamNumber: draft.udyamNumber, panNumber: vendor.panNumber || "" },
       );
       return response.vendor;
     } finally {
@@ -121,12 +121,21 @@ export function useVendorVerification() {
   };
 
   const bulkVerify = async (vendors, onVerified) => {
+    let verifiedCount = 0;
     for (const vendor of vendors) {
       const draft = drafts[vendor.name] || emptyDraft;
-      if (draft.isMSME !== "yes" || !draft.udyamNumber) continue;
-      const updated = await verifyVendor(vendor, draft);
+      const effectiveDraft = {
+        ...draft,
+        isMSME: draft.isMSME || (vendor.vendorMaster?.isMSME ? "yes" : ""),
+        udyamNumber: draft.udyamNumber || vendor.vendorMaster?.udyamNumber || "",
+        enterpriseType: draft.enterpriseType || vendor.vendorMaster?.enterpriseType || "Micro",
+      };
+      if (!effectiveDraft.udyamNumber?.trim() || effectiveDraft.isMSME === "no") continue;
+      const updated = await verifyVendor(vendor, effectiveDraft);
       onVerified(vendor.name, updated);
+      verifiedCount += 1;
     }
+    return verifiedCount;
   };
 
   const statsFor = useMemo(
