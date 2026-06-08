@@ -43,7 +43,8 @@ function calculateMSMEInterest(input = {}) {
 
   const invoiceDate = parseDate(input.invoiceDate, "invoiceDate");
   const asOnDate = parseDate(input.asOnDate || input.paymentDate, "asOnDate");
-  const annualInterestRate = normalizeAnnualRate(input.annualInterestRate);
+  const hasExplicitAnnualRate = input.annualInterestRate !== "" && input.annualInterestRate != null;
+  const annualInterestRate = hasExplicitAnnualRate ? normalizeAnnualRate(input.annualInterestRate) : null;
   const bankRatePercent = getConfiguredBankRatePercent();
   const due = calculateInvoiceInterest({
     invoiceDate: input.invoiceDate,
@@ -57,7 +58,10 @@ function calculateMSMEInterest(input = {}) {
     interestPrincipal: principal,
     paymentDate: input.paymentDate || "",
     asOnDate: input.asOnDate || input.paymentDate,
-  }, {}, { asOnDate: input.asOnDate || input.paymentDate, bankRatePercent, annualInterestRate });
+  }, {}, {
+    asOnDate: input.asOnDate || input.paymentDate,
+    ...(hasExplicitAnnualRate ? { annualInterestRate, bankRatePercent } : {}),
+  });
   const daysOutstanding = daysBetween(invoiceDate, asOnDate);
 
   return {
@@ -74,9 +78,11 @@ function calculateMSMEInterest(input = {}) {
     appointedDay: due.appointedDay,
     interestStartDate: due.interestStartDate,
     delayDays: due.delayDays,
-    bankRatePercent,
-    annualInterestRate,
-    annualInterestRatePercent: roundMoney(annualInterestRate * 100),
+    bankRatePercent: due.bankRatePercent,
+    annualInterestRate: due.annualInterestRate,
+    annualInterestRatePercent: due.annualInterestRatePercent,
+    interestRateSource: due.interestRateSource,
+    ratePeriods: due.ratePeriods,
     interest: due.interest,
     totalPayable: roundMoney(principal + due.interest),
     isDelayed: due.delayDays > 0,

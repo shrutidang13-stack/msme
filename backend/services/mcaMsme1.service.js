@@ -11,7 +11,7 @@ const { buildMcaMsme1Xml, validateMcaXmlPayload } = require("./mcaMsme1Xml.servi
 const TEMPLATE_PATH = path.resolve(process.cwd(), "backend/templates/MSME_Excel_Layout.xlsm");
 const OUTPUT_DIR = path.resolve(process.cwd(), "backend/storage/mca-msme1");
 const MAX_UTILITY_ROWS = 99998;
-const DEFAULT_REASON = "Amount outstanding beyond MSMED Act payment period as per books";
+const DEFAULT_REASON = "Agreed Payment terms";
 
 function nowIso() {
   return new Date().toISOString();
@@ -467,7 +467,7 @@ function downloadPath(id) {
 
 function saveMcaSupplierRows(filingId, rows = []) {
   const normalizedRows = rows.map(supplierRowForDb);
-  const validationByIndex = validateMcaSupplierRows(normalizedRows, { cin: "TEMP", companyName: "TEMP" }, { fiscalYear: "2025-26", halfYear: "oct-mar" });
+  const validationByIndex = validateMcaSupplierRows(normalizedRows, { cin: "TEMP", pan: "TEMP", companyName: "TEMP" }, { fiscalYear: "2025-26", halfYear: "oct-mar" });
   const tx = db.transaction(() => {
     db.prepare("DELETE FROM mca_msme1_supplier_rows WHERE filing_id = ?").run(filingId);
     const insert = db.prepare(`

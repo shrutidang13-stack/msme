@@ -10,6 +10,7 @@ function validateMcaXmlPayload(payload = {}) {
   const errors = [];
   const company = payload.companyDetails || {};
   if (!company.cin) errors.push({ field: "cin", message: "CIN is required for MCA MSME Form-1 XML." });
+  if (!company.pan) errors.push({ field: "pan", message: "Company PAN is required for MCA MSME Form-1 XML." });
   if (!company.companyName) errors.push({ field: "companyName", message: "Company name is required." });
   if (!payload.fiscalYear) errors.push({ field: "fiscalYear", message: "Fiscal year is required." });
   if (!["apr-sep", "oct-mar"].includes(payload.halfYear)) errors.push({ field: "halfYear", message: "Half-year must be apr-sep or oct-mar." });
@@ -44,6 +45,7 @@ function buildMcaMsme1Xml(payload = {}) {
 <MCA_MSME_FORM_1>
   <Company>
     <CIN>${escapeXml(company.cin)}</CIN>
+    <PAN>${escapeXml(company.pan)}</PAN>
     <Name>${escapeXml(company.companyName)}</Name>
   </Company>
   <Period>

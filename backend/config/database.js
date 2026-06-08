@@ -361,6 +361,38 @@ function migrate() {
       FOREIGN KEY(report_id) REFERENCES tax_audit_reports(id)
     );
 
+    CREATE TABLE IF NOT EXISTS rbi_bank_rates (
+      id TEXT PRIMARY KEY,
+      effective_from_date TEXT NOT NULL,
+      effective_to_date TEXT,
+      bank_rate REAL NOT NULL,
+      source_url TEXT NOT NULL,
+      downloaded_pdf_path TEXT NOT NULL DEFAULT '',
+      source_type TEXT NOT NULL DEFAULT 'official_fetch',
+      is_manual_override INTEGER NOT NULL DEFAULT 0,
+      override_reason TEXT NOT NULL DEFAULT '',
+      created_by TEXT NOT NULL DEFAULT '',
+      fetched_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_rbi_bank_rates_unique_source
+      ON rbi_bank_rates(effective_from_date, COALESCE(effective_to_date, ''), bank_rate, source_url, is_manual_override);
+
+    CREATE INDEX IF NOT EXISTS idx_rbi_bank_rates_period
+      ON rbi_bank_rates(effective_from_date, effective_to_date);
+
+    CREATE TABLE IF NOT EXISTS rbi_bank_rate_audit_log (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      old_value_json TEXT NOT NULL DEFAULT '{}',
+      new_value_json TEXT NOT NULL DEFAULT '{}',
+      changed_by TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      source_url TEXT NOT NULL DEFAULT '',
+      changed_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS auditor_details (
       report_id TEXT PRIMARY KEY,
       payload_json TEXT NOT NULL DEFAULT '{}',

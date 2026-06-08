@@ -43,6 +43,7 @@ const mcaMsme1Service = require("../services/mcaMsme1.service");
 const taxAuditSchemaService = require("../services/taxAuditSchema.service");
 const taxAuditReportService = require("../services/taxAuditReport.service");
 const carryForwardService = require("../services/carryForward.service");
+const rbiBankRateService = require("../services/rbiBankRate.service");
 const db = require("../config/database");
 
 function withMockTally(handler) {
@@ -1488,7 +1489,7 @@ test("MSME report uses persisted vouchers for payable aging", () => {
   assert.equal(report.summary.actualPaymentRuleId, "ITA-2025-ACTUAL-PAYMENT-037");
   assert.equal(report.summary.bankRatePercent, 5.5);
   assert.equal(report.summary.annualInterestRatePercent, 16.5);
-  assert.equal(report.summary.interestRateSource, "config");
+  assert.equal(report.summary.interestRateSource, "config_fallback");
   assert.equal(report.summary.voucherSource, "Voucher Collection");
   assert.equal(report.summary.fallbackUsed, true);
   assert.equal(report.summary.vouchersPersisted, 2);
@@ -1497,7 +1498,7 @@ test("MSME report uses persisted vouchers for payable aging", () => {
   assert.equal(report.report[0].outstandingAmount, 999);
   assert.equal(report.report[0].daysOutstanding, 61);
   assert.equal(report.report[0].delayDays, 46);
-  assert.equal(report.report[0].disallowed, 999);
+  assert.equal(report.report[0].disallowed, 600);
   assert.equal(report.report[0].appliedRules.includes("ITA-ACTUAL-PAYMENT-037"), false);
   assert.equal(report.report[0].appliedRules.includes("ITA-2025-ACTUAL-PAYMENT-037"), true);
   const bundle = buildEvidenceBundle(report);
@@ -1580,6 +1581,8 @@ test("report schedules preserve acceptance date, paid-late Clause 26 amount, Sec
   assert.equal(accept.acceptanceDate, "2025-04-20");
   assert.equal(accept.appointedDay, "2025-06-04");
   assert.equal(paidLate.paidLateAmount, 500);
+  assert.equal(paidLate.principalDisallowance, 500);
+  assert.equal(report.report[0].disallowed, 1500);
   assert.ok(report.schedules.msmedSection16Interest.length > 0);
   assert.ok(report.schedules.msmedSection23PermanentDisallowance.length > 0);
   assert.equal(report.schedules.baselineValidation[0].baselineDate, "2025-03-31");
@@ -1587,7 +1590,7 @@ test("report schedules preserve acceptance date, paid-late Clause 26 amount, Sec
   assert.match(report.schedules.baselineValidation[0].warning, /snapshot is unavailable/i);
 });
 
-test("FY-wise MSME report derives ledger outstanding from FY movement instead of cumulative ledger closing balance", () => {
+test("FY-wise MSME report keeps Tally closing authoritative and exposes voucher-only outstanding separately", () => {
   vendorRepository.upsertVendorStatus(
     {
       vendorName: "Scoped Supplier",
@@ -1639,9 +1642,10 @@ test("FY-wise MSME report derives ledger outstanding from FY movement instead of
   assert.equal(report.summary.reportToDate, "20260528");
   assert.equal(report.summary.cappedByAsOn, true);
   assert.equal(report.report.length, 1);
-  assert.equal(report.report[0].ledgerOutstandingAmount, 200);
+  assert.equal(report.report[0].ledgerOutstandingAmount, 10000);
   assert.equal(report.report[0].voucherOutstandingAmount, 200);
-  assert.equal(report.report[0].outstandingAmount, 200);
+  assert.equal(report.report[0].outstandingAmount, 10000);
+  assert.equal(report.report[0].outstandingMismatch, true);
 });
 
 test("All FY MSME report exposes year-wise summary groups", () => {
@@ -1671,6 +1675,8 @@ test("MSME compliance workbook export includes all statutory verification sheets
     "Verification Required",
     "MCA MSME Form-1 Data",
     "Assumptions & Notes",
+    "Form 3CD Disclosure",
+    "43B Disclosure",
   ]);
 });
 
@@ -2118,6 +2124,66 @@ test("payable aging matches invoice and full payment by bill reference", () => {
   assert.equal(aging[0].invoiceCount, 1);
   assert.equal(aging[0].paymentCount, 1);
   assert.equal(aging[0].exposure43Bh, 0);
+  assert.equal(aging[0].allInvoices[0].allocationMethod, "bill_reference");
+});
+
+test("payable aging falls back to debit and credit polarity when voucher type is unavailable", () => {
+  const aging = buildPayableAgingFromVouchers([
+    {
+      ledgerName: "Polarity Supplier",
+      normalizedLedgerName: "POLARITY SUPPLIER",
+      date: "2026-04-01",
+      voucherType: "",
+      voucherNumber: "CR-ROW",
+      credit: 1000,
+      amount: 1000,
+    },
+    {
+      ledgerName: "Polarity Supplier",
+      normalizedLedgerName: "POLARITY SUPPLIER",
+      date: "2026-04-20",
+      voucherType: "",
+      voucherNumber: "DR-ROW",
+      debit: 250,
+      amount: 250,
+    },
+  ], "2026-06-30", { vendorTerms: new Map([["POLARITY SUPPLIER", 45]]) });
+
+  assert.equal(aging.length, 1);
+  assert.equal(aging[0].invoiceCount, 1);
+  assert.equal(aging[0].paymentCount, 1);
+  assert.equal(aging[0].outstandingAmount, 750);
+  assert.equal(aging[0].invoices[0].allocationMethod, "fifo");
+});
+
+test("payable aging trusts voucher type before debit credit polarity for Tally ledger rows", () => {
+  const aging = buildPayableAgingFromVouchers([
+    {
+      ledgerName: "Typed Supplier",
+      normalizedLedgerName: "TYPED SUPPLIER",
+      date: "2026-03-31",
+      voucherType: "Journal",
+      voucherNumber: "INV-TYPED",
+      debit: 1000,
+      amount: 1000,
+    },
+    {
+      ledgerName: "Typed Supplier",
+      normalizedLedgerName: "TYPED SUPPLIER",
+      date: "2026-05-20",
+      voucherType: "Payment",
+      voucherNumber: "PAY-TYPED",
+      credit: 250,
+      amount: 250,
+    },
+  ], "2026-06-06", { vendorTerms: new Map([["TYPED SUPPLIER", 45]]) });
+
+  assert.equal(aging.length, 1);
+  assert.equal(aging[0].invoiceCount, 1);
+  assert.equal(aging[0].paymentCount, 1);
+  assert.equal(aging[0].outstandingAmount, 750);
+  assert.equal(aging[0].allInvoices[0].delayDays, 22);
+  assert.equal(aging[0].allInvoices[0].exposure43Bh, 750);
 });
 
 test("payable aging includes paid-late invoices as audit evidence", () => {
@@ -2277,6 +2343,87 @@ test("payable aging keeps ledger outstanding amount and exposes voucher amount s
   assert.equal(enriched[0].payableAging.outstandingAmount, 600);
 });
 
+test("payable aging keeps ledger-only balances out of delay and interest when invoice evidence is unavailable", () => {
+  const enriched = enrichCreditorsWithVoucherAging([{
+    party: "Ledger Only Supplier",
+    normalizedVendorName: "LEDGER ONLY SUPPLIER",
+    outstandingAmount: 1501162.47,
+    reportFromDate: "20260401",
+    vendorMaster: { agreedPaymentDays: 45 },
+  }], [], "2026-06-05");
+
+  assert.equal(enriched[0].outstandingAmount, 1501162.47);
+  assert.equal(enriched[0].voucherOutstandingAmount, 0);
+  assert.equal(enriched[0].payableAging.allInvoices[0].allocationMethod, "ledger_estimate");
+  assert.equal(enriched[0].payableAging.allInvoices[0].allowedPaymentDays, 45);
+  assert.equal(enriched[0].payableAging.allInvoices[0].delayDays, 0);
+  assert.equal(enriched[0].payableAging.allInvoices[0].exposure43Bh, 0);
+  assert.equal(enriched[0].payableAging.interest, 0);
+  assert.equal(enriched[0].payableAging.allInvoices[0].verificationRequired, true);
+  assert.ok(enriched[0].payableAging.allInvoices[0].verificationFlags.includes("LEDGER_ONLY_ESTIMATE"));
+});
+
+test("MSME report consolidates duplicate and similar vendor names without ledger-only delay estimates", () => {
+  vendorRepository.upsertVendorStatus(
+    {
+      vendorName: "Galvanic Infotech Pvt Ltd",
+      isMSME: true,
+      verificationStatus: "verified",
+      udyamStatus: "verified",
+      udyamNumber: "UDYAM-UP-28-0100619",
+      enterpriseType: "Small",
+      panNumber: "AADCG2211M",
+      agreedPaymentDays: 45,
+    },
+    "unit-test",
+    "unit_test"
+  );
+  const runId = importRepository.createRun({
+    fiscalYear: "2026-27",
+    fromDate: "20260401",
+    toDate: "20270331",
+    asOn: "2026-06-06",
+    companyName: "Test Company",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, {
+    summary: { fiscalYear: "2026-27", companyName: "Test Company" },
+    creditors: [
+      {
+        party: "Galvanic Infotech Pvt Ltd",
+        normalizedVendorName: "GALVANIC INFOTECH",
+        parent: "Sundry Creditors",
+        groupHierarchy: ["Sundry Creditors"],
+        outstandingAmount: 111156,
+      },
+      {
+        party: "Galvanic Infotech Pvt Ltd",
+        normalizedVendorName: "GALVANIC INFOTECH",
+        parent: "Sundry Creditors",
+        groupHierarchy: ["Sundry Creditors"],
+        outstandingAmount: 111156,
+      },
+      {
+        party: "Galvanic Infotech Private Limited",
+        normalizedVendorName: "GALVANIC INFOTECH",
+        parent: "Sundry Creditors",
+        groupHierarchy: ["Sundry Creditors"],
+        outstandingAmount: 100,
+      },
+    ],
+    ledgerVouchers: [],
+  });
+
+  const report = createMSMEReport({ importRunId: runId, fiscalYear: "2026-27", actor: "unit-test" });
+  assert.equal(report.report.length, 1);
+  assert.equal(report.report[0].vendorName, "Galvanic Infotech Pvt Ltd");
+  assert.equal(report.report[0].ledgerOutstandingAmount, 111256);
+  assert.equal(report.report[0].delayDays, 0);
+  assert.equal(report.report[0].disallowed, 0);
+  assert.equal(report.report[0].interest, 0);
+  assert.ok(report.report[0].invoiceAging[0].verificationFlags.includes("LEDGER_ONLY_ESTIMATE"));
+});
+
 test("report includes only verified MSME vendors", () => {
   const rows = calculateReportRows([
     {
@@ -2319,6 +2466,22 @@ test("report includes only verified MSME vendors", () => {
       daysOutstanding: 90,
       bucket: "61-90 days",
       vendorMaster: { isMSME: false, verificationStatus: "not_msme", udyamStatus: "not_started" },
+    },
+    {
+      party: "Medium Enterprise",
+      normalizedVendorName: "MEDIUM",
+      parent: "Sundry Creditors",
+      groupHierarchy: ["Sundry Creditors"],
+      outstandingAmount: 4000,
+      daysOutstanding: 120,
+      bucket: "90+ days",
+      vendorMaster: {
+        isMSME: true,
+        verificationStatus: "verified",
+        udyamStatus: "verified",
+        udyamNumber: "UDYAM-DL-01-7654321",
+        enterpriseType: "Medium",
+      },
     },
   ]);
   assert.equal(rows.length, 1);
@@ -2551,7 +2714,7 @@ test("MCA MSME-1 Excel upload parser and XML generator validate supplier rows", 
     reportId: latestReport.id,
     fileName: "mca-upload.xlsx",
     contentBase64: buffer.toString("base64"),
-    companyDetails: { cin: "U12345DL2020PLC123456", companyName: "Test Company" },
+    companyDetails: { cin: "U12345DL2020PLC123456", pan: "ABCDE1234F", companyName: "Test Company" },
     fiscalYear: latestReport.fiscalYear,
     halfYear: "oct-mar",
     actor: "unit-test",
@@ -2560,13 +2723,14 @@ test("MCA MSME-1 Excel upload parser and XML generator validate supplier rows", 
   assert.equal(uploaded.rows[0].supplierName, "XML Supplier");
   const xml = mcaMsme1Service.generateXml({
     filingId: uploaded.filing.id,
-    companyDetails: { cin: "U12345DL2020PLC123456", companyName: "Test Company" },
+    companyDetails: { cin: "U12345DL2020PLC123456", pan: "ABCDE1234F", companyName: "Test Company" },
     actor: "unit-test",
   });
   assert.equal(xml.generated, true);
   const xmlPath = mcaMsme1Service.xmlDownloadPath(xml.generationId);
   const xmlText = fs.readFileSync(xmlPath, "utf8");
   assert.match(xmlText, /<MCA_MSME_FORM_1>/);
+  assert.match(xmlText, /<PAN>ABCDE1234F<\/PAN>/);
   assert.match(xmlText, /<PrincipalOutstanding>500\.00<\/PrincipalOutstanding>/);
   assert.match(xmlText, /<DelayDays>60<\/DelayDays>/);
   assert.match(xmlText, /<Section16Interest>75\.00<\/Section16Interest>/);
@@ -2574,7 +2738,7 @@ test("MCA MSME-1 Excel upload parser and XML generator validate supplier rows", 
 
   const invalid = mcaMsme1Service.validateMcaSupplierRows(
     [{ supplierName: "Invalid Supplier", amountPaidAfter45: 100 }],
-    { cin: "U12345DL2020PLC123456", companyName: "Test Company" },
+    { cin: "U12345DL2020PLC123456", pan: "ABCDE1234F", companyName: "Test Company" },
     { fiscalYear: "2025-26", halfYear: "oct-mar" }
   );
   assert.equal(invalid.valid, false);
@@ -2667,6 +2831,69 @@ test("MSME interest calculator returns zero interest when there is no delay", ()
   assert.equal(result.interest, 0);
   assert.equal(result.totalPayable, 10000);
   assert.equal(result.isDelayed, false);
+});
+
+test("RBI Bank Rate parser reads only Bank Rate history rows", () => {
+  const html = `
+    <h5>Bank Rate</h5>
+    From To Bank Rate Penal Interest Rate Total
+    05 Dec, 2025 Till Date 5.50% 8% 13.50%
+    06 Jun, 2025 04 Dec, 2025 5.75% 8% 13.75%
+    Policy Repo Rate : 9.99%
+    Standing Deposit Facility Rate : 8.88%
+  `;
+  const rows = rbiBankRateService.parseBankRateRows(html, "https://www.dicgc.org.in/bank-rate", "2026-06-08T00:00:00.000Z");
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((row) => row.bankRate), [5.5, 5.75]);
+  assert.equal(rows[0].effectiveFromDate, "2025-12-05");
+  assert.equal(rows[0].effectiveToDate, null);
+});
+
+test("RBI Bank Rate official update stores history and manual override audit log", async () => {
+  const html = `
+    From To Bank Rate Penal Interest Rate Total
+    01 Jan, 2024 31 Jan, 2024 6.00% 8% 14.00%
+  `;
+  const update = await rbiBankRateService.updateFromOfficialSource({
+    actor: "unit-test",
+    fetcher: async (url) => (url.includes("page=2") ? "" : html),
+  });
+  assert.equal(update.parsed, 1);
+  assert.ok(rbiBankRateService.listRates().some((row) => row.effectiveFromDate === "2024-01-01" && row.bankRate === 6));
+  const override = rbiBankRateService.createManualOverride({
+    effectiveFromDate: "2024-02-01",
+    effectiveToDate: "2024-02-29",
+    bankRate: 6.25,
+    reason: "RBI circular verified manually for unit test",
+  }, "unit-test");
+  assert.equal(override.isManualOverride, true);
+  assert.equal(rbiBankRateService.getRateForDate("2024-02-15").bankRate, 6.25);
+  assert.ok(rbiBankRateService.listAuditLog().some((row) => row.action === "rbi_bank_rate_manual_override" && /unit test/i.test(row.reason)));
+});
+
+test("MSME interest uses date-wise Bank Rate periods when delay crosses rate changes", () => {
+  rbiBankRateService.createManualOverride({
+    effectiveFromDate: "2025-01-01",
+    effectiveToDate: "2025-01-31",
+    bankRate: 6,
+    reason: "January test rate",
+  }, "unit-test");
+  rbiBankRateService.createManualOverride({
+    effectiveFromDate: "2025-02-01",
+    effectiveToDate: "2025-02-28",
+    bankRate: 5,
+    reason: "February test rate",
+  }, "unit-test");
+  const result = calculateMSMEInterest({
+    principal: 10000,
+    invoiceDate: "2025-01-01",
+    asOnDate: "2025-02-20",
+  });
+  assert.equal(result.delayDays, 35);
+  assert.equal(result.interestRateSource, "manual_override");
+  assert.equal(result.ratePeriods.length, 2);
+  assert.deepEqual(result.ratePeriods.map((period) => period.bankRatePercent), [6, 5]);
+  assert.ok(result.interest > 0);
 });
 
 test("MSME interest calculator compounds interest with monthly rests after 45 days", () => {

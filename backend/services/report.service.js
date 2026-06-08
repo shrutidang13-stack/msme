@@ -8,9 +8,9 @@ const vendorRepository = require("../repositories/vendorRepository");
 const { buildVerificationSummary, enrichCreditors } = require("./tallyImport.service");
 const {
   evaluateVendor,
+  hasReportableUdyam,
   loadRulePack,
   getConfiguredBankRatePercent,
-  getDefaultAnnualInterestRate,
   taxBasisForFiscalYear,
 } = require("./msmeRuleEngine.service");
 const { enrichCreditorsWithVoucherAging } = require("./payableAging.service");
@@ -18,6 +18,7 @@ const { validateUdyamNumber } = require("./udyamVerifier.service");
 const carryForwardService = require("./carryForward.service");
 const { isSundryCreditorRow } = require("../utils/sundryCreditor");
 const { fiscalYearDates, displayDate, normalizeCompactDate } = require("../utils/financialYear");
+const { normalizeVendorName } = require("../utils/normalizeVendorName");
 
 const LEGAL_SOURCE_MANIFEST_PATH = path.resolve(process.cwd(), "docs/legal/rule-source-manifest.json");
 
@@ -27,10 +28,23 @@ function loadLegalSourceManifest() {
 
 function isReportableMSME(vendor) {
   return Boolean(
-    vendor.vendorMaster?.isMSME &&
-    ["verified", "approved"].includes(vendor.vendorMaster?.udyamStatus) &&
+    hasReportableUdyam(vendor.vendorMaster) &&
     validateUdyamNumber(vendor.vendorMaster?.udyamNumber)
   );
+}
+
+function reportVerificationStatus(master) {
+  if (!master) return "N/A";
+  if (["verified", "approved"].includes(master.udyamStatus || master.verificationStatus)) return "Verified";
+  return hasReportableUdyam(master) ? "Success" : (master.udyamStatus || master.verificationStatus || "N/A");
+}
+
+function reportVerificationSource(master) {
+  if (!master) return "N/A";
+  if (master.verificationSource === "live_portal") return "Udyam portal";
+  if (master.verificationSource === "fallback_upload") return "Automated Udyam data";
+  if (hasReportableUdyam(master)) return "Automated Udyam check";
+  return master.verificationSource || "N/A";
 }
 
 function isZeroActivity(vendor) {
@@ -41,8 +55,146 @@ function roundMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function summarizeBankRateSource(rows = []) {
+  const periods = rows.flatMap((row) => [
+    ...(row.ratePeriods || []),
+    ...(row.invoiceAging || []).flatMap((invoice) => invoice.ratePeriods || []),
+    ...(row.interestLines || []).flatMap((line) => line.ratePeriods || []),
+  ]).filter((period) => Number(period.bankRatePercent || 0) > 0);
+  const unique = [];
+  const seen = new Set();
+  for (const period of periods) {
+    const key = [
+      period.fromDate || "",
+      period.toDate || "",
+      period.effectiveFromDate || "",
+      period.effectiveToDate || "",
+      period.bankRatePercent || "",
+      period.sourceType || "",
+      period.sourceUrl || "",
+      period.isManualOverride ? "manual" : "",
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push(period);
+  }
+  const sourceTypes = Array.from(new Set(unique.map((period) => period.sourceType || "config_fallback")));
+  const first = unique[0] || {};
+  const bankRatePercent = Number(first.bankRatePercent || getConfiguredBankRatePercent());
+  const annualInterestRatePercent = roundMoney(bankRatePercent * 3);
+  const source = sourceTypes.length > 1 ? "mixed_period_rates" : (sourceTypes[0] || "config_fallback");
+  const sourceUrl = unique.map((period) => period.sourceUrl).find(Boolean) || "";
+  const bankRateSourceNote = unique.length
+    ? unique.map((period) => {
+      const periodLabel = `${period.effectiveFromDate || period.fromDate || ""} to ${period.effectiveToDate || period.toDate || "Till Date"}`;
+      const override = period.isManualOverride && period.overrideReason ? `; manual override reason: ${period.overrideReason}` : "";
+      return `Bank Rate ${period.bankRatePercent}% effective ${periodLabel} from ${period.sourceUrl || period.sourceType || "configured fallback"}${override}`;
+    }).join(" | ")
+    : `Configured fallback Bank Rate ${bankRatePercent}% used because no stored RBI/DICGC rate matched.`;
+  return {
+    bankRatePercent,
+    annualInterestRatePercent,
+    interestRateSource: source,
+    bankRateSourceUrl: sourceUrl,
+    bankRatePeriods: unique,
+    bankRateSourceNote,
+  };
+}
+
+function payableFromLedgerBalance(creditor = {}) {
+  const explicit = Number(creditor.ledgerOutstandingAmount ?? creditor.outstandingAmount ?? 0);
+  if (explicit > 0) return roundMoney(explicit);
+  const closing = Number(creditor.closingBalance || 0);
+  if (closing < 0) return roundMoney(Math.abs(closing));
+  if (String(creditor.closingBalanceType || "").toLowerCase() === "credit" && closing > 0) return roundMoney(closing);
+  return 0;
+}
+
 function normalizedNameOf(row) {
   return row.normalizedVendorName || row.normalizedLedgerName || "";
+}
+
+function reportableVendorKey(row = {}) {
+  return [
+    row.financialYear || "",
+    row.normalizedVendorName || normalizeVendorName(row.party || row.name),
+    row.panNumber || row.vendorMaster?.panNumber || "",
+    row.vendorMaster?.udyamNumber || row.udyamNumber || "",
+  ].map((part) => String(part || "").trim().toUpperCase()).join("|");
+}
+
+function amountSignature(row = {}) {
+  return [
+    row.party || row.name || "",
+    row.normalizedVendorName || "",
+    row.ledgerOutstandingAmount ?? row.outstandingAmount ?? 0,
+    row.voucherOutstandingAmount || 0,
+    row.openingBalance || 0,
+    row.closingBalance || 0,
+    row.voucherCount || 0,
+    row.financialYear || "",
+  ].map((part) => String(part ?? "").trim().toUpperCase()).join("|");
+}
+
+function consolidateCreditorRows(creditors = []) {
+  const groups = new Map();
+  for (const creditor of creditors) {
+    const key = reportableVendorKey(creditor);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        row: { ...creditor },
+        signatures: new Set(),
+        names: new Set(),
+      });
+    }
+    const group = groups.get(key);
+    const signature = amountSignature(creditor);
+    group.names.add(creditor.party || creditor.name || "");
+    if (group.signatures.has(signature)) continue;
+    if (group.signatures.size > 0) {
+      group.row.outstandingAmount = roundMoney(Number(group.row.outstandingAmount || 0) + Number(creditor.outstandingAmount || 0));
+      group.row.ledgerOutstandingAmount = roundMoney(Number(group.row.ledgerOutstandingAmount || 0) + Number(creditor.ledgerOutstandingAmount ?? creditor.outstandingAmount ?? 0));
+      group.row.voucherOutstandingAmount = roundMoney(Number(group.row.voucherOutstandingAmount || 0) + Number(creditor.voucherOutstandingAmount || 0));
+      group.row.voucherCount = Number(group.row.voucherCount || 0) + Number(creditor.voucherCount || 0);
+      group.row.fyDebit = roundMoney(Number(group.row.fyDebit || 0) + Number(creditor.fyDebit || 0));
+      group.row.fyCredit = roundMoney(Number(group.row.fyCredit || 0) + Number(creditor.fyCredit || 0));
+      group.row.outstandingMismatch = Boolean(group.row.outstandingMismatch || creditor.outstandingMismatch);
+      group.row.validationFlags = Array.from(new Set([...(group.row.validationFlags || []), ...(creditor.validationFlags || [])]));
+    }
+    group.signatures.add(signature);
+  }
+  return Array.from(groups.values()).map((group) => {
+    const names = Array.from(group.names).filter(Boolean);
+    return {
+      ...group.row,
+      party: names.sort((a, b) => a.length - b.length)[0] || group.row.party,
+      consolidatedLedgerNames: names,
+      consolidatedLedgerCount: names.length,
+    };
+  });
+}
+
+function invoiceSignature(invoice = {}) {
+  return [
+    invoice.voucherId || "",
+    invoice.invoiceNumber || invoice.voucherNumber || invoice.billReference || "",
+    invoice.invoiceDate || invoice.date || "",
+    invoice.principalAmount || invoice.originalAmount || invoice.pendingAmount || 0,
+    invoice.paymentDate || "",
+    invoice.allocationMethod || "",
+  ].map((part) => String(part ?? "").trim().toUpperCase()).join("|");
+}
+
+function dedupeInvoices(invoices = []) {
+  const seen = new Set();
+  const rows = [];
+  for (const invoice of invoices) {
+    const signature = invoiceSignature(invoice);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    rows.push(invoice);
+  }
+  return rows;
 }
 
 function buildScopedLedgerCreditors(baseCreditors = [], vouchers = [], run, selectedFinancialYear, scope) {
@@ -85,18 +237,24 @@ function buildScopedLedgerCreditors(baseCreditors = [], vouchers = [], run, sele
       const openingBalance = currentOpeningByVendor.get(normalized) ?? Number(creditor.openingBalance || 0);
       const movement = movementByPeriodVendor.get(`${period.financialYear}|${normalized}`) || { debit: 0, credit: 0, voucherCount: 0 };
       const derivedClosing = roundMoney(openingBalance + movement.debit - movement.credit);
+      const authoritativeLedgerOutstanding = payableFromLedgerBalance(creditor);
       const hasLedgerBalanceDetail = Boolean(
         creditor.openingBalanceRaw ||
         creditor.closingBalanceRaw ||
         Number(creditor.openingBalance || 0) ||
-        Number(creditor.closingBalance || 0)
+        Number(creditor.closingBalance || 0) ||
+        authoritativeLedgerOutstanding
       );
       const singleFyStoredOutstanding = run.fiscalYear !== "custom" && !hasLedgerBalanceDetail
         ? Number(creditor.ledgerOutstandingAmount ?? creditor.outstandingAmount ?? 0)
         : null;
-      const ledgerOutstanding = singleFyStoredOutstanding == null
-        ? (derivedClosing < 0 ? Math.abs(derivedClosing) : 0)
-        : Math.max(singleFyStoredOutstanding, 0);
+      const derivedPayable = derivedClosing < 0 ? Math.abs(derivedClosing) : 0;
+      const ledgerOutstanding = authoritativeLedgerOutstanding > 0
+        ? authoritativeLedgerOutstanding
+        : singleFyStoredOutstanding == null
+          ? derivedPayable
+          : Math.max(singleFyStoredOutstanding, 0);
+      const derivedMismatch = Math.abs(roundMoney(ledgerOutstanding) - roundMoney(derivedPayable)) >= 0.01;
       if (includePeriod) {
         snapshots.push({
           ...creditor,
@@ -106,14 +264,19 @@ function buildScopedLedgerCreditors(baseCreditors = [], vouchers = [], run, sele
           asOnDate: period.asOnDate || scope.asOnDate || run.asOn,
           cappedByAsOn: Boolean(period.cappedByAsOn),
           openingBalance,
-          closingBalance: singleFyStoredOutstanding == null ? derivedClosing : -ledgerOutstanding,
+          closingBalance: creditor.closingBalance ?? (singleFyStoredOutstanding == null ? derivedClosing : -ledgerOutstanding),
           openingBalanceRaw: creditor.openingBalanceRaw || "",
-          closingBalanceRaw: "",
+          closingBalanceRaw: creditor.closingBalanceRaw || "",
+          derivedClosingBalance: derivedClosing,
           fyDebit: roundMoney(movement.debit),
           fyCredit: roundMoney(movement.credit),
           voucherCount: movement.voucherCount,
           outstandingAmount: ledgerOutstanding,
           ledgerOutstandingAmount: ledgerOutstanding,
+          voucherOutstandingAmount: creditor.voucherOutstandingAmount || 0,
+          outstandingMismatch: Boolean(creditor.outstandingMismatch || (movement.voucherCount > 0 && derivedMismatch)),
+          mismatchReason: creditor.mismatchReason || (movement.voucherCount > 0 && derivedMismatch ? "Tally closing balance differs from FY voucher-derived closing" : ""),
+          validationFlags: Array.from(new Set([...(creditor.validationFlags || []), ...(movement.voucherCount === 0 && ledgerOutstanding > 0 ? ["LEDGER_ONLY_OUTSTANDING"] : [])])),
           openingBaselineDate: "2025-03-31",
           openingBaselineAmount: Number(creditor.openingBalance || 0) < 0 ? Math.abs(Number(creditor.openingBalance || 0)) : 0,
           openingAsOnDate: "2025-04-01",
@@ -144,7 +307,7 @@ function calculateReportRows(creditors, options = {}) {
     })
     .map((vendor) => {
       const ruleResult = evaluateVendor(vendor, evaluationOptions);
-      const invoiceLines = vendor.payableAging?.allInvoices || [];
+      const invoiceLines = dedupeInvoices(vendor.payableAging?.allInvoices || []);
       const unpaidDelayedInvoices = invoiceLines.filter((invoice) => invoice.unpaidDelayed);
       const paidLateInvoices = invoiceLines.filter((invoice) => invoice.paidLate);
       const interestLines = invoiceLines.filter((invoice) => invoice.overdue).map((invoice) => ({
@@ -163,12 +326,28 @@ function calculateReportRows(creditors, options = {}) {
         paymentDate: invoice.paymentDate || "",
         daysDelayed: invoice.delayDays || 0,
         rbiBankRate: invoice.bankRatePercent ?? ruleResult.bankRatePercent,
+        interestRateSource: invoice.interestRateSource || ruleResult.interestRateSource,
+        ratePeriods: invoice.ratePeriods || ruleResult.ratePeriods || [],
         interestAmount: Number(invoice.interest || 0),
         evidenceReference: invoice.evidenceReference || invoice.voucherId || invoice.voucherNumber || "",
+        allocationMethod: invoice.allocationMethod || "",
+        verificationRequired: Boolean(invoice.verificationRequired),
+        verificationFlags: invoice.verificationFlags || [],
         status: invoice.status || "",
       }));
       const invoiceInterest = roundMoney(interestLines.reduce((sum, row) => sum + Number(row.interestAmount || 0), 0));
-      const invoiceDisallowance = roundMoney(unpaidDelayedInvoices.reduce((sum, row) => sum + Number(row.exposure43Bh || 0), 0));
+      const invoiceDisallowance = roundMoney(
+        unpaidDelayedInvoices.reduce((sum, row) => sum + Number(row.exposure43Bh || 0), 0) +
+        paidLateInvoices.reduce((sum, row) => sum + Number(row.paidLateAmount || row.principalAmount || row.originalAmount || 0), 0)
+      );
+      const evidenceDelayDays = invoiceLines.length
+        ? Math.max(0, ...invoiceLines.map((invoice) => Number(invoice.delayDays || 0)))
+        : ruleResult.delayDays;
+      const effectiveDisallowance = invoiceLines.length ? invoiceDisallowance : ruleResult.disallowed;
+      const effectiveInterest = invoiceLines.length ? invoiceInterest : ruleResult.interest;
+      const effectiveIsDelayed = invoiceLines.length
+        ? evidenceDelayDays > 0 || effectiveDisallowance > 0 || effectiveInterest > 0
+        : ruleResult.isDelayed;
       return {
         vendorName: vendor.party,
         normalizedVendorName: vendor.normalizedVendorName,
@@ -193,27 +372,28 @@ function calculateReportRows(creditors, options = {}) {
         closingBalanceRaw: vendor.closingBalanceRaw || "",
         daysOutstanding: vendor.daysOutstanding,
         allowedPaymentDays: ruleResult.allowedPaymentDays,
-        delayDays: ruleResult.delayDays,
+        delayDays: evidenceDelayDays,
         bucket: vendor.bucket,
         oldestInvoiceDate: vendor.oldestInvoiceDate,
-        isDelayed: ruleResult.isDelayed,
-        disallowed: ruleResult.disallowed,
-        interest: invoiceInterest || ruleResult.interest,
+        isDelayed: effectiveIsDelayed,
+        disallowed: effectiveDisallowance,
+        interest: effectiveInterest,
         invoiceAging: invoiceLines,
         unpaidDelayedInvoices,
         paidLateInvoices,
         interestLines,
-        principalDisallowance43Bh: ruleResult.disallowed,
-        interestDisallowanceSection23: invoiceInterest || ruleResult.interest,
+        principalDisallowance43Bh: effectiveDisallowance,
+        interestDisallowanceSection23: effectiveInterest,
         interestRate: ruleResult.interestRate,
         bankRatePercent: ruleResult.bankRatePercent,
         annualInterestRatePercent: ruleResult.annualInterestRatePercent,
         interestRateSource: ruleResult.interestRateSource,
+        ratePeriods: ruleResult.ratePeriods || [],
         agreedPaymentDays: vendor.agreedPaymentDays || vendor.vendorMaster?.agreedPaymentDays || ruleResult.allowedPaymentDays,
         applicableAct: ruleResult.applicableAct,
         applicableSection: ruleResult.applicableSection,
         actualPaymentRuleId: ruleResult.actualPaymentRuleId,
-        taxImpact: ruleResult.taxImpact,
+        taxImpact: effectiveDisallowance ? roundMoney(effectiveDisallowance * Number(options.taxRate || 0.25)) : 0,
         appliedRules: ruleResult.appliedRules,
         findings: ruleResult.findings,
         legalBasis: ruleResult.legalBasis,
@@ -226,6 +406,103 @@ function calculateReportRows(creditors, options = {}) {
     });
 }
 
+function minDateValue(values = []) {
+  return values
+    .map((value) => normalizeCompactDate(value))
+    .filter(Boolean)
+    .sort()[0] || "";
+}
+
+function maxDateValue(values = []) {
+  const dates = values.map((value) => normalizeCompactDate(value)).filter(Boolean).sort();
+  return dates[dates.length - 1] || "";
+}
+
+function mergeUniqueRows(rows = [], signatureFn = (row) => JSON.stringify(row)) {
+  const seen = new Set();
+  const merged = [];
+  for (const row of rows) {
+    const signature = signatureFn(row);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    merged.push(row);
+  }
+  return merged;
+}
+
+function reportRowConsolidationKey(row = {}) {
+  return [
+    row.normalizedVendorName || normalizeVendorName(row.vendorName),
+    row.panNumber || "",
+    row.udyamNumber || "",
+  ].map((part) => String(part || "").trim().toUpperCase()).join("|");
+}
+
+function consolidateReportRows(rows = [], selectedFinancialYear = "") {
+  if (selectedFinancialYear !== "all") return rows;
+  const groups = new Map();
+  for (const row of rows) {
+    const key = reportRowConsolidationKey(row);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  return Array.from(groups.values()).map((groupRows) => {
+    const sorted = [...groupRows].sort((a, b) => String(a.financialYear || "").localeCompare(String(b.financialYear || "")));
+    const base = sorted.find((row) => Number(row.disallowed || 0) > 0 || Number(row.interest || 0) > 0) || sorted[0];
+    const invoiceAging = mergeUniqueRows(sorted.flatMap((row) => row.invoiceAging || []), invoiceSignature);
+    const unpaidDelayedInvoices = mergeUniqueRows(sorted.flatMap((row) => row.unpaidDelayedInvoices || []), invoiceSignature);
+    const paidLateInvoices = mergeUniqueRows(sorted.flatMap((row) => row.paidLateInvoices || []), invoiceSignature);
+    const interestLines = mergeUniqueRows(sorted.flatMap((row) => row.interestLines || []), (line) => [
+      line.invoiceNumber || "",
+      line.invoiceDate || "",
+      line.paymentDate || "",
+      line.unpaidAmount || 0,
+      line.paidLateAmount || 0,
+      line.interestAmount || 0,
+    ].map((part) => String(part ?? "").trim().toUpperCase()).join("|"));
+    const ledgerOutstandingAmount = Math.max(...sorted.map((row) => Number(row.ledgerOutstandingAmount ?? row.outstandingAmount ?? 0)));
+    const outstandingAmount = Math.max(...sorted.map((row) => Number(row.outstandingAmount ?? row.ledgerOutstandingAmount ?? 0)));
+    const voucherOutstandingAmount = roundMoney(sorted.reduce((sum, row) => sum + Number(row.voucherOutstandingAmount || 0), 0));
+    const interest = roundMoney(interestLines.reduce((sum, row) => sum + Number(row.interestAmount || 0), 0));
+    const disallowed = roundMoney(
+      unpaidDelayedInvoices.reduce((sum, row) => sum + Number(row.exposure43Bh || 0), 0) +
+      paidLateInvoices.reduce((sum, row) => sum + Number(row.paidLateAmount || row.principalAmount || row.originalAmount || 0), 0)
+    );
+    return {
+      ...base,
+      financialYear: "all",
+      reportFromDate: minDateValue(sorted.map((row) => row.reportFromDate)),
+      reportToDate: maxDateValue(sorted.map((row) => row.reportToDate)),
+      asOnDate: maxDateValue(sorted.map((row) => row.asOnDate)),
+      outstandingAmount,
+      ledgerOutstandingAmount,
+      voucherOutstandingAmount,
+      outstandingMismatch: sorted.some((row) => row.outstandingMismatch),
+      mismatchReason: mergeUniqueRows(sorted.map((row) => row.mismatchReason).filter(Boolean)).join("; "),
+      openingBalance: sorted[0].openingBalance || 0,
+      closingBalance: sorted[sorted.length - 1].closingBalance || 0,
+      daysOutstanding: Math.max(0, ...sorted.map((row) => Number(row.daysOutstanding || 0))),
+      delayDays: Math.max(0, ...invoiceAging.map((invoice) => Number(invoice.delayDays || 0))),
+      oldestInvoiceDate: minDateValue([
+        ...sorted.map((row) => row.oldestInvoiceDate),
+        ...invoiceAging.map((invoice) => invoice.invoiceDate || invoice.date),
+      ]),
+      isDelayed: sorted.some((row) => row.isDelayed) || disallowed > 0 || interest > 0,
+      disallowed,
+      interest,
+      invoiceAging,
+      unpaidDelayedInvoices,
+      paidLateInvoices,
+      interestLines,
+      principalDisallowance43Bh: disallowed,
+      interestDisallowanceSection23: interest,
+      taxImpact: disallowed ? roundMoney(disallowed * 0.25) : 0,
+      fyDebit: roundMoney(sorted.reduce((sum, row) => sum + Number(row.fyDebit || 0), 0)),
+      fyCredit: roundMoney(sorted.reduce((sum, row) => sum + Number(row.fyCredit || 0), 0)),
+    };
+  });
+}
+
 function exclusionReason(vendor) {
   const master = vendor.vendorMaster;
   if (isZeroActivity(vendor)) return "no_current_activity";
@@ -236,8 +513,7 @@ function exclusionReason(vendor) {
   if (master.udyamStatus === "pending_manual_review") return "proof_pending_review";
   if (master.udyamStatus === "rejected" || master.reviewStatus === "rejected") return "manual_rejected";
   if (!master.udyamNumber) return "missing_udyam";
-  if (!["verified", "approved"].includes(master.udyamStatus)) return "not_verified";
-  if (!master.isMSME) return "non_msme";
+  if (!hasReportableUdyam(master)) return "not_verified";
   if (!validateUdyamNumber(master.udyamNumber)) return "invalid_udyam";
   return "";
 }
@@ -414,6 +690,11 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       unpaidDelayedAmount: roundMoney(invoice.exposure43Bh || 0),
       daysDelayed: Number(invoice.delayDays || 0),
       rbiBankRate: invoice.bankRatePercent ?? row.bankRatePercent ?? summary.bankRatePercent,
+      bankRateSource: invoice.interestRateSource || row.interestRateSource || summary.interestRateSource || "",
+      bankRatePeriods: (invoice.ratePeriods || row.ratePeriods || []).map((period) =>
+        `${period.fromDate || period.effectiveFromDate || ""} to ${period.toDate || period.effectiveToDate || "Till Date"}: ${period.bankRatePercent}% (${period.sourceType || "source"})`
+      ).join(" | "),
+      bankRateSourceUrl: (invoice.ratePeriods || row.ratePeriods || []).map((period) => period.sourceUrl).filter(Boolean)[0] || summary.bankRateSourceUrl || "",
       interestAmount: roundMoney(invoice.interest || 0),
       evidenceReference: invoice.evidenceReference || invoice.voucherId || invoice.voucherNumber || "",
       verificationRequired: Boolean(invoice.verificationRequired || verificationFlags.length),
@@ -437,6 +718,11 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       daysDelayed: row.daysDelayed,
       interestAmount: roundMoney(row.interestAmount),
       rbiBankRate: row.rbiBankRate || summary.bankRatePercent,
+      bankRateSource: row.interestRateSource || summary.interestRateSource,
+      bankRatePeriods: (row.ratePeriods || []).map((period) =>
+        `${period.fromDate || period.effectiveFromDate || ""} to ${period.toDate || period.effectiveToDate || "Till Date"}: ${period.bankRatePercent}%`
+      ).join(" | "),
+      bankRateSourceUrl: (row.ratePeriods || []).map((period) => period.sourceUrl).filter(Boolean)[0] || summary.bankRateSourceUrl || "",
       interestPayable: roundMoney(row.interestAmount),
       interestPaid: 0,
     }));
@@ -452,7 +738,7 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
     reason: "Interest payable or paid under MSMED Act Section 16 is permanently disallowed under MSMED Act Section 23.",
   }));
   const disallowance43Bh = invoiceAging
-    .filter((row) => row.unpaidDelayedAmount > 0)
+    .filter((row) => row.unpaidDelayedAmount > 0 || row.paidLateAmount > 0)
     .map((row) => ({
       financialYear: row.financialYear,
       vendorName: row.vendorName,
@@ -460,13 +746,15 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       udyamNumber: row.udyamNumber,
       invoiceNumber: row.invoiceNumber,
       basis: summary.applicableSection || "Section 43B(h)",
-      principalDisallowance: row.unpaidDelayedAmount,
+      principalDisallowance: roundMoney(row.unpaidDelayedAmount || row.paidLateAmount || 0),
       principalAmount: row.principalAmount,
       daysDelayed: row.daysDelayed,
-      paymentStatus: "unpaid_delayed",
+      paymentStatus: row.paidLateAmount > 0 ? "paid_late" : "unpaid_delayed",
       allowedInYear: "Year of actual payment",
       evidenceReference: row.evidenceReference,
-      remarks: "Delayed MSME principal unpaid at reporting date.",
+      remarks: row.paidLateAmount > 0
+        ? "MSME principal paid after appointed day; disallowed in purchase FY under actual-payment rule."
+        : "Delayed MSME principal unpaid at reporting date.",
     }));
   const clause22 = msmedSection16Interest.map((row) => ({
     financialYear: row.financialYear,
@@ -498,10 +786,10 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
     principalAmount: row.principalAmount,
     paidLateAmount: row.paidLateAmount || row.principalAmount,
     unpaidDelayedAmount: 0,
-    disallowanceAmount: 0,
-    principalDisallowance: 0,
+    disallowanceAmount: row.paidLateAmount || row.principalAmount,
+    principalDisallowance: row.paidLateAmount || row.principalAmount,
     status: "paid_late",
-    remarks: "Paid beyond appointed day during the reporting period; disclosed separately from closing unpaid disallowance.",
+    remarks: "Paid beyond appointed day; disallowed in purchase FY and allowed in year of actual payment.",
   }));
   const reportToCompact = normalizeCompactDate(summary.reportToDate);
   const clause22ByVendor = new Map();
@@ -527,7 +815,11 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
     const target = clause22ByVendor.get(key);
     target.totalPurchasesFromMicroSmall = roundMoney(target.totalPurchasesFromMicroSmall + Number(row.principalAmount || 0));
     target.amountPaidDuringYear = roundMoney(target.amountPaidDuringYear + Number(row.paidLateAmount || 0));
-    target.clause22iiiBOutstandingDisallowance = roundMoney(target.clause22iiiBOutstandingDisallowance + Number(row.unpaidDelayedAmount || 0));
+    target.clause22iiiBOutstandingDisallowance = roundMoney(
+      target.clause22iiiBOutstandingDisallowance +
+      Number(row.unpaidDelayedAmount || 0) +
+      Number(row.paidLateAmount || 0)
+    );
     target.outstandingBalanceDisallowance = target.clause22iiiBOutstandingDisallowance;
     target.interestUnderSection16 = roundMoney(target.interestUnderSection16 + Number(row.interestAmount || 0));
     const paymentCompact = normalizeCompactDate(row.paymentDate);
@@ -554,10 +846,10 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       principalDisallowance: row.clause22iiiBOutstandingDisallowance,
       sourceClause: "Clause 22(iii)(b)",
       allowedInYear: "Year of actual payment",
-      remarks: "Derived from Clause 22(iii)(b) outstanding balance.",
+      remarks: "Derived from delayed MSME invoice evidence including unpaid and paid-late principal.",
     }));
   const clause26 = [
-    ...disallowance43Bh.map((row) => ({
+    ...disallowance43Bh.filter((row) => row.paymentStatus !== "paid_late").map((row) => ({
       financialYear: row.financialYear,
       supplier: row.vendorName,
       vendorName: row.vendorName,
@@ -629,8 +921,8 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       udyamNumber: row.udyamNumber || "",
       enterpriseType: row.enterpriseType || "",
       msmeStatus: "MSME",
-      verificationStatus: row.vendorMaster?.udyamStatus || "verified",
-      verificationSource: row.vendorMaster?.verificationSource || row.vendorMaster?.source || "master",
+      verificationStatus: reportVerificationStatus(row.vendorMaster),
+      verificationSource: reportVerificationSource(row.vendorMaster),
       evidenceLink: row.vendorMaster?.evidenceLink || row.vendorMaster?.evidenceUrl || row.vendorMaster?.udyamProofFileUrl || "",
       approvedBy: row.vendorMaster?.approvedBy || row.vendorMaster?.reviewedBy || row.vendorMaster?.udyamVerifiedBy || "",
       approvedAt: row.vendorMaster?.approvedAt || row.vendorMaster?.reviewedAt || row.vendorMaster?.udyamVerifiedAt || "",
@@ -723,7 +1015,7 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       section: summary.applicableSection || "Section 43B(h)",
       principalDisallowance: row.principalDisallowance,
       interestPermanentDisallowance: 0,
-      paymentStatus: "unpaid_or_outstanding_at_year_end",
+      paymentStatus: row.paymentStatus || "delayed_principal",
       allowedInYear: row.allowedInYear,
       remarks: row.remarks,
     })),
@@ -741,12 +1033,20 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
     })),
   ];
   const assumptionsAndNotes = [
-    { area: "RBI bank rate source", assumption: `Static configured bank rate ${summary.bankRatePercent}% used`, impact: "Interest is recalculated when configuration changes.", userActionRequired: "Update MSME_BANK_RATE_PERCENT for period-specific rate." },
+    { area: "RBI bank rate source", assumption: summary.bankRateSourceNote || `RBI Bank Rate ${summary.bankRatePercent}% used`, impact: "MSME interest is calculated at three times the applicable Bank Rate with monthly rests.", userActionRequired: "Use Settings > Update RBI Bank Rate or enter a logged manual override when official source is unavailable." },
     { area: "Interest payment vouchers", assumption: "Interest paid defaults to zero unless separately identifiable.", impact: "Closing interest payable may be overstated if interest was paid outside mapping.", userActionRequired: "Map interest payment vouchers." },
     { area: "Baseline source", assumption: "31.03.2025 baseline is validated when snapshot/prior FY is available.", impact: "Unvalidated opening is treated as a reconciliation note.", userActionRequired: "Fetch or upload Tally baseline snapshot." },
     { area: "Invoice date fallback", assumption: "Invoice date is used when acceptance/deemed acceptance date is missing.", impact: "Calculation uses invoice date where acceptance evidence is unavailable.", userActionRequired: "Attach acceptance/deemed acceptance evidence." },
     { area: "Agreement fallback", assumption: "No written agreement uses 15 days; written agreement with missing days uses 45-day cap with warning.", impact: "Conservative calculation where evidence is incomplete.", userActionRequired: "Attach agreement evidence and credit days." },
   ];
+  const disclosureSchedules = buildTaxAuditDisclosureSchedules({
+    invoiceAging,
+    voucherWiseDelayEvidence: invoiceAging,
+    msmedSection23PermanentDisallowance,
+    clause43BhFromClause22,
+    disallowance43Bh,
+    clause26CarryForwardRegister: [],
+  }, summary);
   return {
     masterSummary: [summary],
     executiveSummary: Object.entries({
@@ -807,6 +1107,8 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
     pendingVerification: verificationRequired,
     scheduleIIIDisclosure,
     scheduleIIIDisclosureSummary: scheduleIIISummary,
+    form3cdClause22Disclosure: disclosureSchedules.form3cdClause22Disclosure,
+    section43BDisclosure: disclosureSchedules.section43BDisclosure,
     auditorDisclosureText: scheduleIIISummary.auditorText,
     mcaMsmeForm1Data: [],
     assumptionsAndNotes,
@@ -826,8 +1128,8 @@ function createMSMEReport({ importRunId, fiscalYear, asOnDate, actor, bankRatePe
     fromDate: scope.reportFromDate ? displayDate(scope.reportFromDate) : "",
     toDate: scope.reportToDate ? displayDate(scope.reportToDate) : "",
   });
-  const baseCreditors = enrichCreditors(importRepository.getCreditors(importRunId));
-  const scopedLedgerCreditors = buildScopedLedgerCreditors(baseCreditors, vouchers, run, selectedFinancialYear, scope);
+  const baseCreditors = consolidateCreditorRows(enrichCreditors(importRepository.getCreditors(importRunId)));
+  const scopedLedgerCreditors = consolidateCreditorRows(buildScopedLedgerCreditors(baseCreditors, vouchers, run, selectedFinancialYear, scope));
   const creditors = selectedFinancialYear === "all" && Array.isArray(run.summary?.financialYearPeriods) && run.summary.financialYearPeriods.length
     ? scopedLedgerCreditors.flatMap((creditor) => {
       const fyVouchers = vouchers.filter((row) => (row.financialYear || row.fiscalYear) === creditor.financialYear);
@@ -841,17 +1143,13 @@ function createMSMEReport({ importRunId, fiscalYear, asOnDate, actor, bankRatePe
     );
   const stats = buildVerificationSummary(creditors);
 
-  const requestedBankRatePercent = bankRatePercent == null || bankRatePercent === "" ? NaN : Number(bankRatePercent);
-  const effectiveBankRatePercent = Number.isFinite(requestedBankRatePercent) && requestedBankRatePercent >= 0
-    ? requestedBankRatePercent
-    : getConfiguredBankRatePercent();
-  const annualInterestRate = getDefaultAnnualInterestRate(effectiveBankRatePercent);
   const taxBasis = taxBasisForFiscalYear(selectedFinancialYear === "all" ? (run.summary?.financialYears?.[0] || run.fiscalYear) : selectedFinancialYear);
-  const report = calculateReportRows(creditors, {
+  const report = consolidateReportRows(calculateReportRows(creditors, {
     fiscalYear: selectedFinancialYear === "all" ? (run.summary?.financialYears?.[0] || run.fiscalYear) : selectedFinancialYear,
-    bankRatePercent: effectiveBankRatePercent,
-    annualInterestRate,
-  });
+    ...(bankRatePercent != null && bankRatePercent !== "" ? { bankRatePercent: Number(bankRatePercent) } : {}),
+    asOnDate: asOnDate || scope.asOnDate || run.asOn,
+  }), selectedFinancialYear);
+  const bankRateSummary = summarizeBankRateSource(report);
   const excluded = calculateExcludedRows(creditors);
   const baselineValidation = buildBaselineValidation(creditors, run, selectedFinancialYear);
   const rulePack = loadRulePack();
@@ -880,9 +1178,12 @@ function createMSMEReport({ importRunId, fiscalYear, asOnDate, actor, bankRatePe
     applicableAct: taxBasis.applicableAct,
     applicableSection: taxBasis.applicableSection,
     actualPaymentRuleId: taxBasis.actualPaymentRuleId,
-    bankRatePercent: effectiveBankRatePercent,
-    annualInterestRatePercent: Math.round(annualInterestRate * 10000) / 100,
-    interestRateSource: "config",
+    bankRatePercent: bankRateSummary.bankRatePercent,
+    annualInterestRatePercent: bankRateSummary.annualInterestRatePercent,
+    interestRateSource: bankRateSummary.interestRateSource,
+    bankRateSourceUrl: bankRateSummary.bankRateSourceUrl,
+    bankRatePeriods: bankRateSummary.bankRatePeriods,
+    bankRateSourceNote: bankRateSummary.bankRateSourceNote,
     asOnDate: asOnDate || scope.asOnDate || run.asOn,
     voucherSource: run.summary?.voucherSource || "",
     fallbackUsed: Boolean(run.summary?.fallbackUsed),
@@ -929,12 +1230,18 @@ function createMSMEReport({ importRunId, fiscalYear, asOnDate, actor, bankRatePe
     actor,
   });
   const carryForward = carryForwardService.buildRegister(savedReport.id);
+  const mergedSchedules = {
+    ...savedReport.schedules,
+    clause26CarryForwardRegister: carryForward.rows,
+    clause26CarryForwardSummary: carryForward.summary,
+  };
+  const disclosureSchedules = buildTaxAuditDisclosureSchedules(mergedSchedules, savedReport.summary || summary);
   return {
     ...savedReport,
     schedules: {
-      ...savedReport.schedules,
-      clause26CarryForwardRegister: carryForward.rows,
-      clause26CarryForwardSummary: carryForward.summary,
+      ...mergedSchedules,
+      form3cdClause22Disclosure: disclosureSchedules.form3cdClause22Disclosure,
+      section43BDisclosure: disclosureSchedules.section43BDisclosure,
     },
   };
 }
@@ -943,12 +1250,18 @@ function getReport(id) {
   const report = reportRepository.getReport(id);
   if (!report) return null;
   const carryForward = carryForwardService.getOrBuildRegister(id);
+  const mergedSchedules = {
+    ...report.schedules,
+    clause26CarryForwardRegister: carryForward.rows,
+    clause26CarryForwardSummary: carryForward.summary,
+  };
+  const disclosureSchedules = buildTaxAuditDisclosureSchedules(mergedSchedules, report.summary || {});
   return {
     ...report,
     schedules: {
-      ...report.schedules,
-      clause26CarryForwardRegister: carryForward.rows,
-      clause26CarryForwardSummary: carryForward.summary,
+      ...mergedSchedules,
+      form3cdClause22Disclosure: disclosureSchedules.form3cdClause22Disclosure,
+      section43BDisclosure: disclosureSchedules.section43BDisclosure,
     },
   };
 }
@@ -987,9 +1300,10 @@ function toCsv(report) {
     csv += [source.id, source.title, source.officialUrl || source.officialPdfUrl || "", source.localPdf || source.localPath || "", indexes].map(csvEscape).join(",") + "\n";
   }
   csv += "\nIncluded Vendors\n";
-  csv += "Vendor Name,PAN Number,Udyam No,Enterprise Name,Enterprise Type,Payment Terms,Ledger Payable Outstanding,Voucher-only Outstanding,Outstanding Mismatch,Opening Balance,Closing Balance,Days Outstanding,Allowed Days,Delay Days,Bucket,Delayed?,Disallowed Amount,Tax Impact @25%,Interest,Interest Rate %,Applicable Act,Applicable Section,Applied Rules,Findings\n";
+  csv += "Vendor Name,PAN Number,Udyam No,Enterprise Name,Enterprise Type,Payment Terms,Ledger Payable Outstanding,Voucher-only Outstanding,Outstanding Mismatch,Opening Balance,Closing Balance,Days Outstanding,Allowed Days,Delay Days,Bucket,Delayed?,Disallowed Amount,Tax Impact @25%,Interest,Bank Rate %,Interest Rate %,Rate Source,Rate Periods,Applicable Act,Applicable Section,Applied Rules,Findings\n";
   for (const row of report.report) {
-    csv += [row.vendorName, row.panNumber || "", row.udyamNumber, row.enterpriseName, row.enterpriseType, row.agreedPaymentDays ? `${row.agreedPaymentDays} days` : "", row.ledgerOutstandingAmount?.toFixed ? row.ledgerOutstandingAmount.toFixed(2) : row.outstandingAmount.toFixed(2), Number(row.voucherOutstandingAmount || 0).toFixed(2), row.outstandingMismatch ? "YES" : "NO", row.openingBalanceRaw || Number(row.openingBalance || 0).toFixed(2), row.closingBalanceRaw || Number(row.closingBalance || 0).toFixed(2), row.daysOutstanding ?? "N/A", row.allowedPaymentDays, row.delayDays, row.bucket, row.isDelayed ? "YES" : "NO", row.disallowed.toFixed(2), row.taxImpact.toFixed(2), row.interest.toFixed(2), row.annualInterestRatePercent ?? "", row.applicableAct || "", row.applicableSection || "", (row.appliedRules || []).join(" | "), (row.findings || []).join(" | ")].map(csvEscape).join(",") + "\n";
+    const ratePeriods = (row.ratePeriods || []).map((period) => `${period.fromDate || period.effectiveFromDate || ""} to ${period.toDate || period.effectiveToDate || "Till Date"}: ${period.bankRatePercent}%`).join(" | ");
+    csv += [row.vendorName, row.panNumber || "", row.udyamNumber, row.enterpriseName, row.enterpriseType, row.agreedPaymentDays ? `${row.agreedPaymentDays} days` : "", row.ledgerOutstandingAmount?.toFixed ? row.ledgerOutstandingAmount.toFixed(2) : row.outstandingAmount.toFixed(2), Number(row.voucherOutstandingAmount || 0).toFixed(2), row.outstandingMismatch ? "YES" : "NO", row.openingBalanceRaw || Number(row.openingBalance || 0).toFixed(2), row.closingBalanceRaw || Number(row.closingBalance || 0).toFixed(2), row.daysOutstanding ?? "N/A", row.allowedPaymentDays, row.delayDays, row.bucket, row.isDelayed ? "YES" : "NO", row.disallowed.toFixed(2), row.taxImpact.toFixed(2), row.interest.toFixed(2), row.bankRatePercent ?? "", row.annualInterestRatePercent ?? "", row.interestRateSource || "", ratePeriods, row.applicableAct || "", row.applicableSection || "", (row.appliedRules || []).join(" | "), (row.findings || []).join(" | ")].map(csvEscape).join(",") + "\n";
   }
   if (report.excluded?.length) {
     csv += "\nExcluded Vendors\n";
@@ -997,6 +1311,18 @@ function toCsv(report) {
     for (const row of report.excluded) {
       csv += [row.vendorName, row.panNumber || "", row.udyamNumber, row.udyamStatus, row.actionStatus, row.reviewStatus, row.voucherCount, Number(row.ledgerOutstandingAmount ?? row.outstandingAmount ?? 0).toFixed(2), Number(row.voucherOutstandingAmount || 0).toFixed(2), row.outstandingMismatch ? "YES" : "NO", row.daysOutstanding ?? "N/A", row.reason].map(csvEscape).join(",") + "\n";
     }
+  }
+  const disclosureSchedules = buildTaxAuditDisclosureSchedules(report.schedules || {}, report.summary || {});
+  csv += "\nTax Audit Disclosure Section - Form 3CD\n";
+  csv += "Clause 22 - MSME Disclosure\n";
+  csv += "Disclosure Particular,Amount,Source Schedule,Remarks\n";
+  for (const row of disclosureSchedules.form3cdClause22Disclosure) {
+    csv += [row.disclosureParticular, row.amount, row.sourceSchedule, row.remarks].map(csvEscape).join(",") + "\n";
+  }
+  csv += "\nSection 43B Disclosure Including Clause (h)\n";
+  csv += "Liability Class,Disclosure Particular,Amount,Source Schedule,Remarks\n";
+  for (const row of disclosureSchedules.section43BDisclosure) {
+    csv += [row.liabilityClass, row.disclosureParticular, row.amount === "" ? "Not separately determined" : row.amount, row.sourceSchedule, row.remarks].map(csvEscape).join(",") + "\n";
   }
   return csv;
 }
@@ -1027,6 +1353,7 @@ function verifiedReportHtml(report) {
   const voucherRows = (schedules.voucherWiseDelayEvidence || schedules.invoiceAging || [])
     .filter((row) => rows.some((vendor) => vendor.vendorName === row.vendorName && vendor.financialYear === row.financialYear));
   const summary = report.summary || {};
+  const disclosureSchedules = buildTaxAuditDisclosureSchedules(schedules, summary);
   const generated = new Date(report.createdAt || Date.now()).toLocaleString("en-IN");
   const vendorRows = rows.map((row) => `
     <tr>
@@ -1054,6 +1381,23 @@ function verifiedReportHtml(report) {
       <td class="num">${pdfMoney(row.unpaidDelayedAmount || 0)}</td>
       <td class="num">${escapeHtml(row.daysDelayed || 0)}</td>
       <td class="num">${pdfMoney(row.interestAmount)}</td>
+    </tr>
+  `).join("");
+  const clause22DisclosureRows = disclosureSchedules.form3cdClause22Disclosure.map((row) => `
+    <tr>
+      <td>${escapeHtml(row.disclosureParticular)}</td>
+      <td class="num">${pdfMoney(row.amount)}</td>
+      <td>${escapeHtml(row.sourceSchedule)}</td>
+      <td>${escapeHtml(row.remarks)}</td>
+    </tr>
+  `).join("");
+  const section43BDisclosureRows = disclosureSchedules.section43BDisclosure.map((row) => `
+    <tr>
+      <td>${escapeHtml(row.liabilityClass)}</td>
+      <td>${escapeHtml(row.disclosureParticular)}</td>
+      <td class="num">${row.amount === "" ? "Not separately determined" : pdfMoney(row.amount)}</td>
+      <td>${escapeHtml(row.sourceSchedule)}</td>
+      <td>${escapeHtml(row.remarks)}</td>
     </tr>
   `).join("");
 
@@ -1085,19 +1429,20 @@ function verifiedReportHtml(report) {
 
   <div class="grid">
     <div class="metric"><strong>${pdfMoney(summary.reportVendors)}</strong>Verified MSME vendors</div>
-    <div class="metric"><strong>Rs ${pdfMoney(summary.totalDisallowed)}</strong>FIFO disallowance</div>
+    <div class="metric"><strong>Rs ${pdfMoney(summary.totalDisallowed)}</strong>Disallowance</div>
     <div class="metric"><strong>Rs ${pdfMoney(summary.totalInterest)}</strong>MSMED interest</div>
     <div class="metric"><strong>${escapeHtml(summary.applicableSection || "")}</strong>Applicable section</div>
   </div>
 
   <div class="note">
-    <p><strong>Calculation basis.</strong> Only backend-verified MSME vendors with valid Udyam numbers are included. Principal disallowance is derived from Tally-imported creditor/voucher aging using FIFO invoice settlement and the actual-payment rule for ${escapeHtml(summary.applicableSection || "MSME disallowance")}.</p>
-    <p>Interest is computed invoice-wise under MSMED Section 16 at three times the configured RBI bank rate (${escapeHtml(summary.bankRatePercent || "")}% bank rate; ${escapeHtml(summary.annualInterestRatePercent || "")}% annual interest), with monthly rests. MSMED interest is treated as inadmissible under Section 23.</p>
+    <p><strong>Calculation basis.</strong> MSME vendors with valid Udyam numbers are included. Principal disallowance is derived from Tally-imported creditor/voucher aging using FIFO invoice settlement and the actual-payment rule for ${escapeHtml(summary.applicableSection || "MSME disallowance")}.</p>
+    <p>Interest is computed invoice-wise under MSMED Section 16 at three times the applicable RBI Bank Rate (${escapeHtml(summary.bankRatePercent || "")}% bank rate; ${escapeHtml(summary.annualInterestRatePercent || "")}% annual interest), with monthly rests. MSMED interest is treated as inadmissible under Section 23.</p>
+    <p><strong>Rule Source.</strong> ${escapeHtml(summary.bankRateSourceNote || summary.interestRateSource || "Bank Rate source not available.")}</p>
   </div>
 
   <h2>Verified MSME Vendor Summary</h2>
   <table>
-    <thead><tr><th>FY</th><th>Vendor</th><th>PAN</th><th>Udyam</th><th>Type</th><th>Ledger Outstanding</th><th>Allowed Days</th><th>Delay Days</th><th>FIFO Disallowed</th><th>Interest</th></tr></thead>
+    <thead><tr><th>FY</th><th>Vendor</th><th>PAN</th><th>Udyam</th><th>Type</th><th>Ledger Outstanding</th><th>Allowed Days</th><th>Delay Days</th><th>Disallowed</th><th>Interest</th></tr></thead>
     <tbody>${vendorRows || '<tr><td colspan="10">No verified MSME vendors in this report.</td></tr>'}</tbody>
   </table>
 
@@ -1105,6 +1450,21 @@ function verifiedReportHtml(report) {
   <table>
     <thead><tr><th>FY</th><th>Vendor</th><th>Invoice</th><th>Invoice Date</th><th>Appointed Day</th><th>Payment Date</th><th>Principal</th><th>Unpaid Delayed</th><th>Delay Days</th><th>Interest</th></tr></thead>
     <tbody>${evidenceRows || '<tr><td colspan="10">No delayed invoice evidence rows in this report.</td></tr>'}</tbody>
+  </table>
+
+  <h2>Tax Audit Disclosure Section - Form 3CD</h2>
+  <p class="muted">Disclosure-only section prepared from already-computed MSME schedules. No additional computation logic is applied in this section.</p>
+
+  <h2>Clause 22 - MSME Disclosure</h2>
+  <table>
+    <thead><tr><th>Disclosure Particular</th><th>Amount</th><th>Source Schedule</th><th>Remarks</th></tr></thead>
+    <tbody>${clause22DisclosureRows || '<tr><td colspan="4">No Clause 22 disclosure rows available.</td></tr>'}</tbody>
+  </table>
+
+  <h2>Section 43B Disclosure Including Clause (h)</h2>
+  <table>
+    <thead><tr><th>Liability Class</th><th>Disclosure Particular</th><th>Amount</th><th>Source Schedule</th><th>Remarks</th></tr></thead>
+    <tbody>${section43BDisclosureRows || '<tr><td colspan="5">No Section 43B disclosure rows available.</td></tr>'}</tbody>
   </table>
 </body>
 </html>`;
@@ -1308,15 +1668,108 @@ function withTotals(rows = [], amountKeys = []) {
   return [...safeRows, total];
 }
 
+function buildTaxAuditDisclosureSchedules(schedules = {}, summary = {}) {
+  const invoiceRows = schedules.invoiceAging || schedules.voucherWiseDelayEvidence || [];
+  const interestRows = schedules.msmedSection23PermanentDisallowance || [];
+  const disallowanceRows = schedules.clause43BhFromClause22 || schedules.disallowance43Bh || [];
+  const carryForwardRows = schedules.clause26CarryForwardRegister || [];
+  const totalPayable = roundMoney(invoiceRows.reduce((sum, row) => sum + Number(row.principalAmount || 0), 0));
+  const paidWithinPrescribedTime = roundMoney(invoiceRows
+    .filter((row) => row.status === "paid" && !row.paidLate)
+    .reduce((sum, row) => sum + Number(row.principalAmount || 0), 0));
+  const paidBeyondPrescribedTime = roundMoney(invoiceRows.reduce((sum, row) => sum + Number(row.paidLateAmount || 0), 0));
+  const outstandingAtYearEnd = roundMoney(invoiceRows.reduce((sum, row) => sum + Number(row.unpaidAmount || 0), 0));
+  const interestInadmissible = roundMoney(interestRows.reduce((sum, row) => sum + Number(row.permanentlyDisallowedAmount || row.interestAmount || 0), 0));
+  const currentYear43Bh = roundMoney(disallowanceRows.reduce((sum, row) => sum + Number(row.principalDisallowance || 0), 0));
+  const openingPaidDuringYear = roundMoney(carryForwardRows.reduce((sum, row) => sum + Number(row.deductibleCurrentYear || row.paidDuringYear || 0), 0));
+  const openingNotPaidDuringYear = roundMoney(carryForwardRows.reduce((sum, row) => sum + Number(row.closingCarryForward || 0), 0));
+
+  const form3cdClause22Disclosure = [
+    {
+      clause: "Clause 22",
+      disclosureParticular: "Total amount payable to Micro and Small Enterprises under Section 15 of MSMED Act",
+      amount: totalPayable,
+      sourceSchedule: "Voucher-wise Delay Evidence",
+      remarks: "Total invoice principal identified for reportable Micro/Small suppliers from existing report evidence.",
+    },
+    {
+      clause: "Clause 22",
+      disclosureParticular: "Amount of interest inadmissible under Section 23 of MSMED Act",
+      amount: interestInadmissible,
+      sourceSchedule: "MSMED Section 23 Permanent Disallowance",
+      remarks: "Interest already computed under MSMED Section 16 and treated as inadmissible under Section 23.",
+    },
+    {
+      clause: "Clause 22",
+      disclosureParticular: "Payments made within prescribed time (15/45 days)",
+      amount: paidWithinPrescribedTime,
+      sourceSchedule: "Voucher-wise Delay Evidence",
+      remarks: "Paid invoices where no paid-late flag exists in the existing ageing evidence.",
+    },
+    {
+      clause: "Clause 22",
+      disclosureParticular: "Payments made beyond prescribed time",
+      amount: paidBeyondPrescribedTime,
+      sourceSchedule: "Voucher-wise Delay Evidence",
+      remarks: "Paid-late principal already identified by the existing MSME ageing workflow.",
+    },
+    {
+      clause: "Clause 22",
+      disclosureParticular: "Outstanding as at year-end / report as-on date",
+      amount: outstandingAtYearEnd,
+      sourceSchedule: "Voucher-wise Delay Evidence",
+      remarks: `Outstanding balance as per report period ending ${displayDate(summary.reportToDate || summary.asOnDate || "")}.`,
+    },
+  ];
+
+  const section43BDisclosure = [
+    {
+      section: "Section 43B",
+      liabilityClass: "Liability pre-existing at the beginning of the previous year",
+      disclosureParticular: "Paid during the year",
+      amount: openingPaidDuringYear,
+      sourceSchedule: "Clause 26(A) Carry Forward Register",
+      remarks: "Derived from the existing carry-forward register where available.",
+    },
+    {
+      section: "Section 43B",
+      liabilityClass: "Liability pre-existing at the beginning of the previous year",
+      disclosureParticular: "Not paid during the year",
+      amount: openingNotPaidDuringYear,
+      sourceSchedule: "Clause 26(A) Carry Forward Register",
+      remarks: "Closing carry-forward from existing register.",
+    },
+    {
+      section: summary.applicableSection || "Section 43B(h)",
+      liabilityClass: "Liability incurred during the previous year",
+      disclosureParticular: "Paid on or before due date of return under Section 139(1)",
+      amount: "",
+      sourceSchedule: "Not separately determined",
+      remarks: "Section 139(1) due-date payment tagging is not separately stored in existing report data; no calculation has been added.",
+    },
+    {
+      section: summary.applicableSection || "Section 43B(h)",
+      liabilityClass: "Liability incurred during the previous year",
+      disclosureParticular: "Not paid on or before due date / disallowed as per existing MSME report",
+      amount: currentYear43Bh,
+      sourceSchedule: "43B(h) From Clause 22",
+      remarks: "Uses the already-computed principal disallowance without altering the calculation workflow.",
+    },
+  ];
+
+  return { form3cdClause22Disclosure, section43BDisclosure };
+}
+
 function toWorkbookBuffer(report) {
   const workbook = XLSX.utils.book_new();
   const schedules = report.schedules || {};
+  const disclosureSchedules = buildTaxAuditDisclosureSchedules(schedules, report.summary || {});
   const sheetSpecs = [
     ["Executive Summary", schedules.executiveSummary || schedules.masterSummary || [report.summary || {}], ["metric", "value", "financialYear", "reportFrom", "reportTo", "asOnDate", "cappedByAsOn", "notes"]],
     ["Creditor Ledger Summary", withTotals(schedules.creditorLedgerSummary, ["openingBalance", "ledgerPayableOutstanding", "voucherOnlyOutstanding", "closingBalance"]), ["financialYear", "creditorLedger", "panNumber", "openingBalance", "voucherRows", "ledgerPayableOutstanding", "voucherOnlyOutstanding", "closingBalance", "days", "balanceSource", "mismatchFlag", "baselineStatus"]],
     ["MSME Vendor Registry", schedules.msmeVendorRegistry, ["vendorName", "ledgerName", "panNumber", "udyamNumber", "enterpriseType", "msmeStatus", "verificationStatus", "verificationSource", "evidenceLink", "approvedBy", "approvedAt", "reasonExcluded", "financialYear"]],
     ["Ledger-wise MSME Interest", withTotals(schedules.ledgerWiseMSMEInterest || schedules.interestMovement, ["ledgerPayableOutstanding", "openingInterest", "interestAccrued", "interestPaid", "interestWaived", "closingInterestPayable", "section23Disallowance"]), ["financialYear", "vendor", "ledgerPayableOutstanding", "openingInterest", "interestAccrued", "interestPaid", "interestWaived", "closingInterestPayable", "section23Disallowance"]],
-    ["Voucher-wise Delay Evidence", withTotals(schedules.voucherWiseDelayEvidence || schedules.invoiceAging, ["principalAmount", "unpaidAmount", "paidLateAmount", "interestAmount"]), ["financialYear", "vendorName", "invoiceNumber", "invoiceDate", "acceptanceDate", "dateSource", "hasWrittenAgreement", "agreementDays", "allowedPaymentDays", "appointedDay", "paymentDate", "principalAmount", "unpaidAmount", "paidLateAmount", "daysDelayed", "rbiBankRate", "interestAmount", "evidenceReference", "verificationRequired", "verificationFlags"]],
+    ["Voucher-wise Delay Evidence", withTotals(schedules.voucherWiseDelayEvidence || schedules.invoiceAging, ["principalAmount", "unpaidAmount", "paidLateAmount", "interestAmount"]), ["financialYear", "vendorName", "invoiceNumber", "invoiceDate", "acceptanceDate", "dateSource", "hasWrittenAgreement", "agreementDays", "allowedPaymentDays", "appointedDay", "paymentDate", "principalAmount", "unpaidAmount", "paidLateAmount", "daysDelayed", "rbiBankRate", "bankRateSource", "bankRatePeriods", "bankRateSourceUrl", "interestAmount", "evidenceReference", "verificationRequired", "verificationFlags"]],
     ["Tax Disallowance Summary", withTotals(schedules.taxDisallowanceSummary, ["principalDisallowance", "interestPermanentDisallowance"]), ["financialYear", "vendorName", "invoiceNumber", "disallowanceType", "section", "principalDisallowance", "interestPermanentDisallowance", "paymentStatus", "allowedInYear", "remarks"]],
     ["Clause 22 MSME Computation", withTotals(schedules.clause22Computation, ["totalPurchasesFromMicroSmall", "amountPaidDuringYear", "postMarchPaymentsWithin45Days", "clause22iiiBOutstandingDisallowance", "interestUnderSection16"]), ["financialYear", "supplier", "panNumber", "udyamNumber", "totalPurchasesFromMicroSmall", "amountPaidDuringYear", "postMarchPaymentsWithin45Days", "clause22iiiBOutstandingDisallowance", "outstandingBalanceDisallowance", "interestUnderSection16", "source", "remarks"]],
     ["43B(h) From Clause 22", withTotals(schedules.clause43BhFromClause22, ["principalDisallowance"]), ["financialYear", "supplier", "panNumber", "udyamNumber", "principalDisallowance", "sourceClause", "allowedInYear", "remarks"]],
@@ -1324,8 +1777,11 @@ function toWorkbookBuffer(report) {
     ["Form 3CD Clause 22", withTotals(schedules.clause22, ["interestPayable", "interestPaid", "interestRemainingUnpaid", "amountInadmissible"]), ["financialYear", "supplier", "panNumber", "udyamNumber", "interestPayable", "interestPaid", "interestRemainingUnpaid", "amountInadmissible", "msmedSection", "remarks"]],
     ["Form 3CD Clause 26", withTotals(schedules.clause26, ["principalAmount", "paidLateAmount", "unpaidDelayedAmount", "disallowanceAmount"]), ["financialYear", "supplier", "panNumber", "udyamNumber", "invoiceNumber", "invoiceDate", "appointedDay", "paymentDate", "principalAmount", "paidLateAmount", "unpaidDelayedAmount", "disallowanceAmount", "status", "remarks"]],
     ["Schedule III Disclosure", schedules.scheduleIIIDisclosure, ["disclosureItem", "amount", "sourceSchedule", "notes"]],
+    ["Verification Required", schedules.verificationRequired || schedules.pendingVerification, ["financialYear", "vendorName", "ledger", "invoiceNumber", "issueType", "issueDescription", "blockingFor", "suggestedAction", "evidenceReference", "outstandingAmount"]],
     ["MCA MSME Form-1 Data", schedules.mcaMsmeForm1Data, ["halfYear", "supplierName", "panNumber", "paidWithinTredsCount", "paidWithinTredsAmount", "paidWithinOtherCount", "paidWithinOtherAmount", "paidAfter45Count", "paidAfter45Amount", "outstanding45OrLessCount", "outstanding45OrLessAmount", "outstandingMoreThan45Count", "outstandingMoreThan45Amount", "reasonForDelay", "validationStatus"]],
     ["Assumptions & Notes", schedules.assumptionsAndNotes, ["area", "assumption", "impact", "userActionRequired"]],
+    ["Form 3CD Disclosure", withTotals(disclosureSchedules.form3cdClause22Disclosure, ["amount"]), ["clause", "disclosureParticular", "amount", "sourceSchedule", "remarks"]],
+    ["43B Disclosure", withTotals(disclosureSchedules.section43BDisclosure, ["amount"]), ["section", "liabilityClass", "disclosureParticular", "amount", "sourceSchedule", "remarks"]],
   ];
   for (const [name, rows, headers] of sheetSpecs) {
     const sheet = sheetFromRows(rows, headers);

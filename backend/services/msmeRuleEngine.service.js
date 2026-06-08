@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const env = require("../config/env");
+const rbiBankRateService = require("./rbiBankRate.service");
 
 const RULE_PACK_PATH = path.resolve(process.cwd(), "docs/legal/rules/msme-compliance-rules.json");
 const DEFAULT_ALLOWED_DAYS = 45;
@@ -54,8 +55,23 @@ function taxBasisForFiscalYear(fiscalYear = "2025-26") {
 function isVerifiedMSME(vendorMaster) {
   return Boolean(
     vendorMaster?.isMSME &&
-    ["verified", "approved"].includes(vendorMaster?.udyamStatus)
+    ["verified", "approved"].includes(vendorMaster?.udyamStatus) &&
+    isMicroOrSmallEnterprise(vendorMaster)
   );
+}
+
+function isMicroOrSmallEnterprise(vendorMaster) {
+  const enterpriseType = String(vendorMaster?.enterpriseType || "").trim().toLowerCase();
+  if (!enterpriseType) return true;
+  return /micro|small/.test(enterpriseType) && !/medium/.test(enterpriseType);
+}
+
+function hasReportableUdyam(vendorMaster) {
+  if (!vendorMaster?.udyamNumber) return false;
+  if (["not_msme", "rejected", "invalid_format", "not_verified"].includes(vendorMaster.verificationStatus)) return false;
+  if (["rejected", "invalid_format", "not_verified"].includes(vendorMaster.udyamStatus)) return false;
+  if (!isMicroOrSmallEnterprise(vendorMaster)) return false;
+  return true;
 }
 
 function allowedPaymentDays(vendor = {}) {
@@ -69,6 +85,12 @@ function compoundMonthlyInterest(principal, delayDays, annualRate = getDefaultAn
   const monthlyRate = annualRate / 12;
   const months = delayDays / 30;
   return roundMoney(principal * (Math.pow(1 + monthlyRate, months) - 1));
+}
+
+function minIsoDate(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  return a < b ? a : b;
 }
 
 function parseDate(value) {
@@ -89,6 +111,89 @@ function daysBetween(fromDate, toDate) {
   const to = parseDate(toDate);
   if (!from || !to) return 0;
   return Math.max(Math.floor((to - from) / 86400000), 0);
+}
+
+function dateWiseInterest(principal, fromDate, toDate, options = {}) {
+  const start = parseDate(fromDate);
+  const end = parseDate(toDate);
+  if (!principal || !start || !end || end <= start) {
+    return {
+      interest: 0,
+      bankRatePercent: normalizePercent(options.bankRatePercent, getConfiguredBankRatePercent()),
+      annualInterestRate: getDefaultAnnualInterestRate(normalizePercent(options.bankRatePercent, getConfiguredBankRatePercent())),
+      annualInterestRatePercent: roundMoney(getDefaultAnnualInterestRate(normalizePercent(options.bankRatePercent, getConfiguredBankRatePercent())) * 100),
+      interestRateSource: "config_fallback",
+      ratePeriods: [],
+    };
+  }
+
+  const explicitBankRate = options.bankRatePercent == null || options.bankRatePercent === "" ? NaN : Number(options.bankRatePercent);
+  const explicitAnnualRate = options.annualInterestRate == null || options.annualInterestRate === "" ? NaN : Number(options.annualInterestRate);
+  if (Number.isFinite(explicitBankRate) || Number.isFinite(explicitAnnualRate)) {
+    const bankRatePercent = normalizePercent(explicitBankRate, getConfiguredBankRatePercent());
+    const annualInterestRate = Number.isFinite(explicitAnnualRate) ? explicitAnnualRate : getDefaultAnnualInterestRate(bankRatePercent);
+    const delayDays = daysBetween(fromDate, toDate);
+    return {
+      interest: compoundMonthlyInterest(principal, delayDays, annualInterestRate),
+      bankRatePercent,
+      annualInterestRate,
+      annualInterestRatePercent: roundMoney(annualInterestRate * 100),
+      interestRateSource: "manual_input",
+      ratePeriods: [{
+        fromDate,
+        toDate,
+        delayDays,
+        bankRatePercent,
+        annualInterestRatePercent: roundMoney(annualInterestRate * 100),
+        sourceType: "manual_input",
+        sourceUrl: "",
+        interestAmount: compoundMonthlyInterest(principal, delayDays, annualInterestRate),
+      }],
+    };
+  }
+
+  const endIso = end.toISOString().slice(0, 10);
+  let cursor = start.toISOString().slice(0, 10);
+  let balance = Number(principal || 0);
+  let totalInterest = 0;
+  const ratePeriods = [];
+  while (cursor < endIso) {
+    const rate = rbiBankRateService.getRateForDateOrFallback(cursor);
+    const rateExclusiveEnd = rate.effectiveToDate ? addDays(rate.effectiveToDate, 1) : endIso;
+    const segmentEnd = minIsoDate(rateExclusiveEnd, endIso);
+    const delayDays = daysBetween(cursor, segmentEnd);
+    if (delayDays <= 0) break;
+    const annualInterestRate = getDefaultAnnualInterestRate(rate.bankRate);
+    const interestAmount = compoundMonthlyInterest(balance, delayDays, annualInterestRate);
+    totalInterest = roundMoney(totalInterest + interestAmount);
+    balance = roundMoney(balance + interestAmount);
+    ratePeriods.push({
+      fromDate: cursor,
+      toDate: segmentEnd,
+      delayDays,
+      bankRatePercent: rate.bankRate,
+      annualInterestRatePercent: roundMoney(annualInterestRate * 100),
+      sourceType: rate.sourceType,
+      sourceUrl: rate.sourceUrl,
+      effectiveFromDate: rate.effectiveFromDate,
+      effectiveToDate: rate.effectiveToDate,
+      isManualOverride: rate.isManualOverride,
+      overrideReason: rate.overrideReason,
+      interestAmount,
+    });
+    cursor = segmentEnd;
+  }
+  const sources = Array.from(new Set(ratePeriods.map((period) => period.sourceType || "config_fallback")));
+  const firstPeriod = ratePeriods[0] || {};
+  const firstAnnualRate = getDefaultAnnualInterestRate(firstPeriod.bankRatePercent);
+  return {
+    interest: totalInterest,
+    bankRatePercent: firstPeriod.bankRatePercent ?? getConfiguredBankRatePercent(),
+    annualInterestRate: firstAnnualRate,
+    annualInterestRatePercent: roundMoney(firstAnnualRate * 100),
+    interestRateSource: sources.length > 1 ? "mixed_period_rates" : (sources[0] || "config_fallback"),
+    ratePeriods,
+  };
 }
 
 function booleanish(value) {
@@ -170,23 +275,25 @@ function dueDateForInvoice(invoice = {}, vendor = {}) {
 }
 
 function calculateInvoiceInterest(invoice = {}, vendor = {}, options = {}) {
-  const bankRatePercent = normalizePercent(options.bankRatePercent, getConfiguredBankRatePercent());
-  const annualInterestRate = Number(options.annualInterestRate ?? getDefaultAnnualInterestRate(bankRatePercent));
   const due = dueDateForInvoice(invoice, vendor);
   const principal = Number(invoice.interestPrincipal ?? invoice.unpaidAmount ?? invoice.pendingAmount ?? invoice.amount ?? invoice.originalAmount ?? 0);
   const relevantDate = invoice.paymentDate || options.asOnDate || invoice.asOnDate;
   const delayDays = due.appointedDay && relevantDate ? daysBetween(due.appointedDay, relevantDate) : 0;
-  const interest = compoundMonthlyInterest(principal, delayDays, annualInterestRate);
+  const rateResult = delayDays > 0
+    ? dateWiseInterest(principal, due.appointedDay, relevantDate, options)
+    : dateWiseInterest(0, due.appointedDay || relevantDate, relevantDate, options);
   return {
     ...due,
     principal: roundMoney(principal),
     paymentDate: invoice.paymentDate || "",
     interestStartDate: due.interestStartDate,
     delayDays,
-    bankRatePercent,
-    annualInterestRate,
-    annualInterestRatePercent: roundMoney(annualInterestRate * 100),
-    interest,
+    bankRatePercent: rateResult.bankRatePercent,
+    annualInterestRate: rateResult.annualInterestRate,
+    annualInterestRatePercent: rateResult.annualInterestRatePercent,
+    interestRateSource: rateResult.interestRateSource,
+    ratePeriods: rateResult.ratePeriods,
+    interest: rateResult.interest,
     isDelayed: delayDays > 0,
     verificationRequired: due.verificationRequired,
     verificationFlags: due.verificationFlags,
@@ -197,15 +304,20 @@ function evaluateVendor(vendor, options = {}) {
   const rulePack = options.rulePack || loadRulePack();
   const taxBasis = taxBasisForFiscalYear(options.fiscalYear);
   const master = vendor.vendorMaster;
-  const eligible = isVerifiedMSME(master);
+  const eligible = isVerifiedMSME(master) || hasReportableUdyam(master);
   const daysOutstanding = Number(vendor.daysOutstanding || 0);
   const outstandingAmount = Number(vendor.outstandingAmount || 0);
   const maxDays = allowedPaymentDays(vendor);
   const delayDays = eligible ? Math.max(daysOutstanding - maxDays, 0) : 0;
   const isDelayed = delayDays > 0;
-  const bankRatePercent = normalizePercent(options.bankRatePercent, getConfiguredBankRatePercent());
-  const annualInterestRate = Number(options.annualInterestRate ?? getDefaultAnnualInterestRate(bankRatePercent));
-  const interest = compoundMonthlyInterest(outstandingAmount, delayDays, annualInterestRate);
+  const asOnDate = options.asOnDate || vendor.asOnDate || vendor.reportToDate || "";
+  const interestStartDate = isDelayed && asOnDate ? addDays(addDays(asOnDate, -delayDays), 0) : "";
+  const rateResult = isDelayed && asOnDate
+    ? dateWiseInterest(outstandingAmount, interestStartDate, asOnDate, options)
+    : dateWiseInterest(0, asOnDate, asOnDate, options);
+  const bankRatePercent = rateResult.bankRatePercent;
+  const annualInterestRate = rateResult.annualInterestRate;
+  const interest = rateResult.interest || compoundMonthlyInterest(outstandingAmount, delayDays, annualInterestRate);
   const disallowed = isDelayed ? roundMoney(outstandingAmount) : 0;
   const taxImpact = isDelayed ? roundMoney(outstandingAmount * Number(options.taxRate || 0.25)) : 0;
 
@@ -214,7 +326,9 @@ function evaluateVendor(vendor, options = {}) {
 
   if (eligible) {
     appliedRules.push("MSME-ELIGIBILITY-001");
-    findings.push("Vendor is verified/approved as MSME in Vendor Master.");
+    findings.push(isVerifiedMSME(master)
+      ? "Vendor is verified/approved as MSME in Vendor Master."
+      : "Vendor has a valid imported Udyam number and is included for MSME schedule generation.");
   }
 
   if (eligible && isDelayed) {
@@ -241,7 +355,8 @@ function evaluateVendor(vendor, options = {}) {
     interestRate: annualInterestRate,
     bankRatePercent,
     annualInterestRatePercent: roundMoney(annualInterestRate * 100),
-    interestRateSource: "config",
+    interestRateSource: rateResult.interestRateSource,
+    ratePeriods: rateResult.ratePeriods,
     applicableAct: taxBasis.applicableAct,
     applicableSection: taxBasis.applicableSection,
     actualPaymentRuleId: taxBasis.actualPaymentRuleId,
@@ -270,11 +385,14 @@ module.exports = {
   ACTUAL_PAYMENT_RULE_2025,
   loadRulePack,
   isVerifiedMSME,
+  isMicroOrSmallEnterprise,
+  hasReportableUdyam,
   evaluateVendor,
   compoundMonthlyInterest,
   resolveAppointedDay,
   dueDateForInvoice,
   calculateInvoiceInterest,
+  dateWiseInterest,
   getConfiguredBankRatePercent,
   getDefaultAnnualInterestRate,
   taxBasisForFiscalYear,

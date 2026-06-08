@@ -62,7 +62,7 @@ function localRuleAnswer(question, rulePack, reportContext = null) {
   if (normalized.includes("clause 22") || normalized.includes("interest") || normalized.includes("section 16")) {
     return [
       "Rule-module answer:",
-      "Clause 22 disclosure is driven by MSMED Act interest. The app calculates invoice-wise Section 16 interest for delayed MSME payments at three times the configured RBI bank rate, compounded monthly, and treats MSMED interest as inadmissible under Section 23.",
+      "Clause 22 disclosure is driven by MSMED Act interest. The app calculates invoice-wise Section 16 interest for delayed MSME payments at three times the applicable RBI Bank Rate, compounded monthly, and treats MSMED interest as inadmissible under Section 23.",
       reportContextLine(reportContext),
       `Current configured bank rate: ${bankRate}%. Current computed annual rate: ${annualRate}%.`,
       matchingRules.length ? `Relevant rules: ${matchingRules.map((rule) => `${rule.id} - ${rule.name}`).join("; ")}` : "",

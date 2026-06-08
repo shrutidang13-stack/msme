@@ -1,9 +1,6 @@
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
 const {
   calculateInvoiceInterest,
-  compoundMonthlyInterest,
-  getDefaultAnnualInterestRate,
-  getConfiguredBankRatePercent,
   resolveAppointedDay,
 } = require("./msmeRuleEngine.service");
 
@@ -15,8 +12,17 @@ function roundMoney(value) {
 }
 
 function parseDate(value) {
-  const date = new Date(value || "");
+  const text = String(value || "").trim();
+  const normalized = /^\d{8}$/.test(text)
+    ? `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`
+    : text;
+  const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function isoDate(value) {
+  const date = parseDate(value);
+  return date ? date.toISOString().slice(0, 10) : "";
 }
 
 function daysBetween(fromDate, toDate) {
@@ -49,7 +55,11 @@ function normalizeRef(value) {
 function voucherKind(row) {
   const type = String(row.voucherType || "").toLowerCase();
   if (/purchase|journal/.test(type)) return "invoice";
-  if (/payment/.test(type)) return "payment";
+  if (/payment|receipt/.test(type)) return "payment";
+  const debit = Number(row.debit || 0);
+  const credit = Number(row.credit || 0);
+  if (debit > 0 && debit >= credit) return "payment";
+  if (credit > 0 && credit > debit) return "invoice";
   return "other";
 }
 
@@ -61,8 +71,6 @@ function buildPayableAgingFromVouchers(vouchers = [], asOn, options = {}) {
   const allowedDays = Number(options.allowedDays || DEFAULT_NO_AGREEMENT_DAYS);
   const asOnDate = asOn || new Date().toISOString().split("T")[0];
   const vendorTerms = options.vendorTerms || new Map();
-  const bankRatePercent = Number(options.bankRatePercent ?? getConfiguredBankRatePercent());
-  const annualInterestRate = Number(options.annualInterestRate ?? getDefaultAnnualInterestRate(bankRatePercent));
   const byVendor = new Map();
 
   const ensureVendor = (row) => {
@@ -169,6 +177,7 @@ function buildPayableAgingFromVouchers(vouchers = [], asOn, options = {}) {
             paymentVoucherNumber: payment.voucherNumber,
             paymentDate: payment.date,
             amount: applied,
+            allocationMethod: "bill_reference",
           });
           payment.unappliedAmount = roundMoney(payment.unappliedAmount - applied);
         }
@@ -185,6 +194,7 @@ function buildPayableAgingFromVouchers(vouchers = [], asOn, options = {}) {
           paymentVoucherNumber: payment.voucherNumber,
           paymentDate: payment.date,
           amount: applied,
+          allocationMethod: "fifo",
         });
         payment.unappliedAmount = roundMoney(payment.unappliedAmount - applied);
       }
@@ -211,7 +221,11 @@ function buildPayableAgingFromVouchers(vouchers = [], asOn, options = {}) {
           agreedPaymentDays: invoice.hasWrittenAgreement ? invoice.agreedPaymentDays : 0,
           vendorMaster: { agreedPaymentDays: invoice.hasWrittenAgreement ? invoice.agreedPaymentDays : 0 },
         },
-        { asOnDate, bankRatePercent, annualInterestRate }
+        {
+          asOnDate,
+          ...(options.bankRatePercent != null ? { bankRatePercent: options.bankRatePercent } : {}),
+          ...(options.annualInterestRate != null ? { annualInterestRate: options.annualInterestRate } : {}),
+        }
       );
       const daysOutstanding = daysBetween(invoice.invoiceDate || invoice.date, relevantDate);
       const delayDays = due.delayDays;
@@ -219,6 +233,12 @@ function buildPayableAgingFromVouchers(vouchers = [], asOn, options = {}) {
       const paidLateAmount = isPaid && delayDays > 0 ? invoice.originalAmount : 0;
       return {
         ...invoice,
+        allocationMethod: invoice.paymentApplications.some((item) => item.allocationMethod === "bill_reference")
+          ? "bill_reference"
+          : invoice.paymentApplications.some((item) => item.allocationMethod === "fifo")
+            ? "fifo"
+            : "unallocated",
+        allocationMethods: Array.from(new Set(invoice.paymentApplications.map((item) => item.allocationMethod).filter(Boolean))),
         daysOutstanding,
         allowedPaymentDays: due.allowedPaymentDays,
         appointedDay: due.appointedDay,
@@ -279,6 +299,108 @@ function buildPayableAgingFromVouchers(vouchers = [], asOn, options = {}) {
   return summaries;
 }
 
+function buildLedgerOnlyAging(creditor, asOn, options = {}) {
+  const ledgerOutstandingAmount = roundMoney(creditor.ledgerOutstandingAmount ?? creditor.outstandingAmount);
+  if (ledgerOutstandingAmount <= 0) return null;
+  const agreedPaymentDays = Number(creditor.agreedPaymentDays || creditor.vendorMaster?.agreedPaymentDays || DEFAULT_ALLOWED_DAYS);
+  const invoiceDate = isoDate(
+    creditor.oldestInvoiceDate ||
+    creditor.reportFromDate ||
+    creditor.fyStartDate ||
+    creditor.raw?.asOn ||
+    asOn
+  );
+  const asOnDate = isoDate(asOn || creditor.asOnDate || new Date().toISOString().slice(0, 10));
+  const due = calculateInvoiceInterest(
+    {
+      invoiceDate,
+      date: invoiceDate,
+      amount: ledgerOutstandingAmount,
+      unpaidAmount: ledgerOutstandingAmount,
+      pendingAmount: ledgerOutstandingAmount,
+      interestPrincipal: ledgerOutstandingAmount,
+      asOnDate,
+      hasWrittenAgreement: true,
+      agreedPaymentDays,
+    },
+    {
+      agreedPaymentDays,
+      vendorMaster: { agreedPaymentDays },
+    },
+    {
+      asOnDate,
+      ...(options.bankRatePercent != null ? { bankRatePercent: options.bankRatePercent } : {}),
+      ...(options.annualInterestRate != null ? { annualInterestRate: options.annualInterestRate } : {}),
+    }
+  );
+  const daysOutstanding = daysBetween(invoiceDate, asOnDate);
+  const estimationFlags = Array.from(new Set([...(due.verificationFlags || []), "LEDGER_ONLY_ESTIMATE", "MISSING_INVOICE_REFERENCE"]));
+  const invoice = {
+    voucherId: "",
+    date: invoiceDate,
+    invoiceDate,
+    acceptanceDate: due.baseDate || invoiceDate,
+    deemedAcceptanceDate: "",
+    acceptanceDateSource: due.baseDateSource,
+    voucherNumber: "",
+    invoiceNumber: "Ledger closing balance",
+    voucherType: "Ledger Balance",
+    billReference: "",
+    originalAmount: ledgerOutstandingAmount,
+    principalAmount: ledgerOutstandingAmount,
+    pendingAmount: ledgerOutstandingAmount,
+    paidAmount: 0,
+    paymentApplications: [],
+    hasWrittenAgreement: true,
+    agreedPaymentDays,
+    allowedPaymentDays: due.allowedPaymentDays,
+    appointedDay: due.appointedDay,
+    dueDate: due.appointedDay,
+    interestStartDate: due.interestStartDate,
+    daysOutstanding,
+    delayDays: 0,
+    overdue: false,
+    unpaidDelayed: false,
+    paidLate: false,
+    paidLateAmount: 0,
+    exposure43Bh: 0,
+    interest: 0,
+    bankRatePercent: due.bankRatePercent,
+    annualInterestRatePercent: due.annualInterestRatePercent,
+    verificationRequired: true,
+    verificationFlags: estimationFlags,
+    source: "Tally ledger closing balance",
+    evidenceReference: creditor.guid || creditor.party || creditor.name || "",
+    isPaid: false,
+    status: "unpaid",
+    allocationMethod: "ledger_estimate",
+    allocationMethods: ["ledger_estimate"],
+  };
+  return {
+    vendorName: creditor.party || creditor.name,
+    normalizedVendorName: creditor.normalizedVendorName || normalizeVendorName(creditor.party || creditor.name),
+    agreedPaymentDays,
+    outstandingAmount: ledgerOutstandingAmount,
+    daysOutstanding,
+    bucket: bucketForDays(daysOutstanding),
+    delayed: false,
+    oldestInvoiceDate: invoiceDate,
+    pendingInvoiceCount: 1,
+    paidLateInvoiceCount: 0,
+    delayedInvoiceCount: 0,
+    invoiceCount: 1,
+    paymentCount: 0,
+    exposure43Bh: 0,
+    paidLateAmount: 0,
+    interest: 0,
+    invoices: [invoice],
+    allInvoices: [invoice],
+    paidLateInvoices: [],
+    delayedInvoices: [],
+    allocationMethod: "ledger_estimate",
+  };
+}
+
 function enrichCreditorsWithVoucherAging(creditors = [], vouchers = [], asOn, options = {}) {
   const vendorTerms = new Map(creditors.map((creditor) => [
     creditor.normalizedVendorName || normalizeVendorName(creditor.party || creditor.name),
@@ -290,6 +412,31 @@ function enrichCreditorsWithVoucherAging(creditors = [], vouchers = [], asOn, op
     const normalizedVendorName = creditor.normalizedVendorName || normalizeVendorName(creditor.party || creditor.name);
     const aging = agingByVendor.get(normalizedVendorName);
     if (!aging) {
+      const ledgerOutstandingAmount = roundMoney(creditor.ledgerOutstandingAmount ?? creditor.outstandingAmount);
+      const ledgerOnlyAging = buildLedgerOnlyAging({ ...creditor, ledgerOutstandingAmount }, asOn, options);
+      if (ledgerOnlyAging) {
+        return {
+          ...creditor,
+          outstandingAmount: ledgerOutstandingAmount,
+          ledgerOutstandingAmount,
+          voucherOutstandingAmount: 0,
+          voucherCount: Number(creditor.voucherCount || 0),
+          outstandingMismatch: ledgerOutstandingAmount > 0,
+          mismatchReason: "Ledger closing balance has no invoice-wise voucher evidence",
+          daysOutstanding: ledgerOnlyAging.daysOutstanding,
+          bucket: ledgerOnlyAging.bucket,
+          delayed: ledgerOnlyAging.delayed,
+          disallowanceAmount: ledgerOnlyAging.exposure43Bh,
+          oldestInvoiceDate: ledgerOnlyAging.oldestInvoiceDate,
+          payableAging: {
+            ...ledgerOnlyAging,
+            ledgerOutstandingAmount,
+            voucherOutstandingAmount: 0,
+            outstandingMismatch: ledgerOutstandingAmount > 0,
+            mismatchReason: "Ledger closing balance has no invoice-wise voucher evidence",
+          },
+        };
+      }
       return options.preferVoucherOutstanding
         ? { ...creditor, outstandingAmount: 0, ledgerOutstandingAmount: roundMoney(creditor.outstandingAmount), voucherOutstandingAmount: 0, voucherCount: 0, payableAging: null }
         : { ...creditor, payableAging: null };

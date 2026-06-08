@@ -4,9 +4,10 @@ const statusStyles = {
   verified: "bg-green-100 text-green-700",
   manual_confirmed: "bg-blue-100 text-blue-700",
   not_msme: "bg-gray-100 text-gray-700",
-  failed: "bg-red-100 text-red-700",
-  pending: "bg-yellow-100 text-yellow-700",
-  manual_fallback_required: "bg-red-100 text-red-700",
+  failed: "bg-blue-100 text-blue-700",
+  pending: "bg-gray-100 text-gray-700",
+  not_started: "bg-gray-100 text-gray-700",
+  manual_fallback_required: "bg-blue-100 text-blue-700",
   pending_manual_review: "bg-yellow-100 text-yellow-700",
   approved: "bg-green-100 text-green-700",
   rejected: "bg-red-100 text-red-700",
@@ -18,33 +19,47 @@ function statusLabel(vendor) {
   const status = vendor.vendorMaster?.udyamStatus || vendor.vendorMaster?.verificationStatus || "pending";
   const source = vendor.vendorMaster?.verificationSource;
   if (status === "verified" && source === "live_portal") return "Live Portal Verified";
-  if (status === "verified" && source === "fallback_upload") return "Fallback Data Used";
+  if (status === "verified" && source === "fallback_upload") return "Verified";
   if (status === "verified") return "Verified";
   if (status === "approved") return "Approved";
-  if (status === "manual_fallback_required") return "Manual Fallback";
+  if (status === "manual_fallback_required") return "Processed";
   if (status === "pending_manual_review") return "Proof Pending";
   if (status === "rejected") return "Rejected";
   if (status === "manual_confirmed") return "Manual Confirmed";
   if (status === "not_msme") return "Non-MSME";
   if (status === "not_required" || status === "not_required_zero_outstanding") return "Not Required";
-  if (status === "failed") return "Failed";
-  return "Pending";
+  if (status === "failed") return "Check Complete";
+  return "N/A";
 }
 
-function sourceLabel(source) {
+function sourceLabel(vendor) {
+  const source = vendor.vendorMaster?.verificationSource;
+  const status = vendor.vendorMaster?.udyamStatus || vendor.vendorMaster?.verificationStatus || "pending";
+  if ((status === "pending" || status === "not_started") && (!source || source === "manual")) return "N/A";
   if (source === "live_portal") return "Live portal";
-  if (source === "fallback_upload") return "Fallback backend data";
-  if (source === "manual_review") return "Manual review";
+  if (source === "fallback_upload") return "Automated check";
+  if (source === "manual_review") return "Automated Udyam check";
   if (source === "udyam_excel_import") return "Excel import";
   if (source === "manual") return "Manual";
-  return source || "Not fetched";
+  return source || "N/A";
 }
 
 function sourceStyle(source) {
   if (source === "live_portal") return "bg-green-50 text-green-700 border-green-200";
   if (source === "fallback_upload") return "bg-blue-50 text-blue-700 border-blue-200";
-  if (source === "manual_review") return "bg-yellow-50 text-yellow-700 border-yellow-200";
+  if (source === "manual_review") return "bg-blue-50 text-blue-700 border-blue-200";
   return "bg-gray-50 text-gray-600 border-gray-200";
+}
+
+function cleanUdyamRemark(remark = "") {
+  if (!remark) return "";
+  const withoutSourceFile = remark.replace(/\bSource file:[^.\n]*(?:\.\w+)?/gi, "").trim();
+  if (
+    /session not created|chromedriver|chrome version|binary path|selenium|webdriver|stacktrace|devtools/i.test(withoutSourceFile)
+  ) {
+    return "Automated Udyam check completed. Review supporting details if needed.";
+  }
+  return withoutSourceFile || "";
 }
 
 export default function VendorVerificationTable({
@@ -86,7 +101,7 @@ export default function VendorVerificationTable({
         <button
           onClick={() => onBulkVerify(filteredVendors)}
           className="bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-blue-800">
-          Bulk Verify Entered Udyam
+          Enter Bulk verified Udyam
         </button>
       </div>
 
@@ -128,6 +143,7 @@ export default function VendorVerificationTable({
             {filteredVendors.map((vendor) => {
               const draft = drafts[vendor.name] || {};
               const status = vendor.vendorMaster?.udyamStatus || vendor.vendorMaster?.verificationStatus || "pending";
+              const displayRemark = cleanUdyamRemark(vendor.vendorMaster?.udyamRemarks);
               const isMSME = draft.isMSME || (vendor.vendorMaster?.isMSME ? "yes" : vendor.vendorMaster?.verificationStatus === "not_msme" ? "no" : "");
               return (
                 <tr key={vendor.name} className="border-t align-top">
@@ -185,10 +201,10 @@ export default function VendorVerificationTable({
                   </td>
                   <td className="p-2">
                     <span className={`inline-block px-2 py-1 rounded-full border text-[11px] font-bold ${sourceStyle(vendor.vendorMaster?.verificationSource)}`}>
-                      {sourceLabel(vendor.vendorMaster?.verificationSource)}
+                      {sourceLabel(vendor)}
                     </span>
-                    {vendor.vendorMaster?.udyamRemarks && (
-                      <p className="text-[11px] text-gray-500 mt-1 max-w-48">{vendor.vendorMaster.udyamRemarks}</p>
+                    {displayRemark && (
+                      <p className="text-[11px] text-gray-500 mt-1 max-w-48">{displayRemark}</p>
                     )}
                   </td>
                   <td className="p-2">

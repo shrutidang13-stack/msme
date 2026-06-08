@@ -10,24 +10,25 @@ import {
   createMSMEReport,
   downloadReportFile,
   downloadUrl,
+  createRbiBankRateOverride,
   fetchHealth,
   fetchImports,
   fetchLegalRules,
   fetchMcaMsme1Filings,
   fetchCarryForwardRegister,
+  fetchRbiBankRateAuditLog,
+  fetchRbiBankRates,
   fetchReport,
   fetchReports,
   fetchVendorMaster,
   reportEvidenceBundleUrl,
   reportTallyReconciliationUrl,
+  updateRbiBankRates,
 } from "./services/api";
 
 const NAV = [
   ["dashboard", "Dashboard"],
-  ["tally", "Tally Import"],
-  ["compliance", "MSME Compliance Report"],
-  ["clause22", "Clause 22 & 43B(h)"],
-  ["clause26", "Clause 26(A) Register"],
+  ["tally", "MSME Compliance"],
   ["mca-msme1", "MCA MSME-1 Filing"],
   ["tax-audit", "Tax Audit"],
   ["rules", "Rules"],
@@ -42,7 +43,7 @@ export default function Dashboard({ user }) {
   const handleLogout = async () => { await signOut(auth); };
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen app-shell-bg">
       <nav className="bg-white border-b border-slate-200 px-5 py-3 flex justify-between items-center sticky top-0 z-20">
         <div>
           <h1 className="text-xl font-bold text-slate-900">MSME Guard</h1>
@@ -120,9 +121,6 @@ function Home({ setActiveTab }) {
           <KeyValue label="Latest report" value={latestReport ? `${latestReport.fiscalYear} | ${shortDate(latestReport.createdAt)}` : "No report yet"} />
           <KeyValue label="Report period" value={latestReport?.summary?.reportPeriodLabel || "-"} />
           <div className="grid grid-cols-2 gap-2 mt-4">
-            <button onClick={() => setActiveTab("compliance")} className="bg-emerald-700 text-white px-3 py-2 rounded-md text-sm font-semibold">Compliance Report</button>
-            <button onClick={() => setActiveTab("clause22")} className="bg-slate-100 text-slate-800 px-3 py-2 rounded-md text-sm font-semibold">Clause 22</button>
-            <button onClick={() => setActiveTab("clause26")} className="bg-slate-100 text-slate-800 px-3 py-2 rounded-md text-sm font-semibold">Clause 26(A)</button>
             <button onClick={() => setActiveTab("mca-msme1")} className="bg-slate-100 text-slate-800 px-3 py-2 rounded-md text-sm font-semibold">MCA MSME-1</button>
           </div>
         </Panel>
@@ -503,7 +501,117 @@ function Settings() {
         <Metric label="MCA filings" value={number(data.filings.length)} tone="orange" />
       </div>
       <pre className="bg-slate-950 text-emerald-100 rounded-md p-4 text-xs overflow-auto">{JSON.stringify(settings, null, 2)}</pre>
+      <div className="mt-5">
+        <RbiBankRateAdmin />
+      </div>
     </Panel>
+  );
+}
+
+function RbiBankRateAdmin() {
+  const [state, setState] = useState({ rates: [], latest: null, auditLog: [], message: "", error: "" });
+  const [loading, setLoading] = useState("");
+  const [override, setOverride] = useState({ effectiveFromDate: "", effectiveToDate: "", bankRate: "", reason: "" });
+
+  const load = async () => {
+    const [ratesData, auditData] = await Promise.all([fetchRbiBankRates(), fetchRbiBankRateAuditLog()]);
+    setState((prev) => ({
+      ...prev,
+      rates: ratesData.rates || [],
+      latest: ratesData.latest || null,
+      auditLog: auditData.auditLog || [],
+      error: "",
+    }));
+  };
+
+  useEffect(() => {
+    load().catch((err) => setState((prev) => ({ ...prev, error: err.message })));
+  }, []);
+
+  const updateOfficial = async () => {
+    setLoading("update");
+    setState((prev) => ({ ...prev, message: "", error: "" }));
+    try {
+      const response = await updateRbiBankRates();
+      await load();
+      setState((prev) => ({ ...prev, message: `Official Bank Rate update complete. Parsed ${response.parsed || 0}, inserted ${response.inserted || 0}.` }));
+    } catch (err) {
+      setState((prev) => ({ ...prev, error: err.message || "RBI rate update failed — use last verified rate or manual override." }));
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const saveOverride = async () => {
+    setLoading("override");
+    setState((prev) => ({ ...prev, message: "", error: "" }));
+    try {
+      await createRbiBankRateOverride(override);
+      setOverride({ effectiveFromDate: "", effectiveToDate: "", bankRate: "", reason: "" });
+      await load();
+      setState((prev) => ({ ...prev, message: "Manual Bank Rate override saved and audit logged." }));
+    } catch (err) {
+      setState((prev) => ({ ...prev, error: err.message }));
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const latest = state.latest;
+  return (
+    <div className="border border-slate-200 rounded-md p-4 bg-white">
+      <div className="flex flex-wrap justify-between gap-3 mb-4">
+        <div>
+          <h3 className="text-base font-bold text-slate-900">RBI Bank Rate Source</h3>
+          <p className="text-xs text-slate-500">Official DICGC/RBI Bank Rate history for MSMED Section 16 interest. Repo, reverse repo, SDF, and MSF rates are ignored.</p>
+        </div>
+        <button onClick={updateOfficial} disabled={Boolean(loading)} className="bg-slate-900 text-white px-4 py-2 rounded-md text-sm font-semibold disabled:opacity-50">
+          {loading === "update" ? "Updating..." : "Update RBI Bank Rate"}
+        </button>
+      </div>
+      {state.error && <Alert tone="red" text={state.error} />}
+      {state.message && <Alert tone="green" text={state.message} />}
+      <div className="grid md:grid-cols-4 gap-3 mb-4">
+        <Metric label="Latest Bank Rate" value={latest ? `${latest.bankRate}%` : "Not stored"} tone={latest?.isManualOverride ? "yellow" : "blue"} />
+        <Metric label="Effective From" value={latest?.effectiveFromDate || "-"} tone="slate" />
+        <Metric label="Effective To" value={latest?.effectiveToDate || "Till Date"} tone="slate" />
+        <Metric label="Source" value={latest?.sourceType || "-"} tone={latest?.sourceType === "official_fetch" ? "green" : "orange"} />
+      </div>
+      {latest?.sourceUrl && latest.sourceUrl !== "manual_override" && (
+        <a href={latest.sourceUrl} target="_blank" rel="noreferrer" className="text-xs font-semibold text-blue-700 underline">Open official source</a>
+      )}
+      <div className="grid lg:grid-cols-[1fr_1fr] gap-4 mt-5">
+        <div>
+          <h4 className="text-sm font-bold text-slate-700 mb-2">Manual Override</h4>
+          <div className="grid sm:grid-cols-2 gap-2">
+            <input type="date" value={override.effectiveFromDate} onChange={(event) => setOverride((prev) => ({ ...prev, effectiveFromDate: event.target.value }))} className="field" />
+            <input type="date" value={override.effectiveToDate} onChange={(event) => setOverride((prev) => ({ ...prev, effectiveToDate: event.target.value }))} className="field" />
+            <input type="number" step="0.01" placeholder="Bank Rate %" value={override.bankRate} onChange={(event) => setOverride((prev) => ({ ...prev, bankRate: event.target.value }))} className="field" />
+            <input placeholder="Mandatory reason" value={override.reason} onChange={(event) => setOverride((prev) => ({ ...prev, reason: event.target.value }))} className="field" />
+          </div>
+          <button onClick={saveOverride} disabled={Boolean(loading) || !override.effectiveFromDate || !override.bankRate || !override.reason.trim()} className="mt-3 bg-amber-700 text-white px-4 py-2 rounded-md text-sm font-semibold disabled:opacity-50">
+            {loading === "override" ? "Saving..." : "Save Override"}
+          </button>
+        </div>
+        <div>
+          <h4 className="text-sm font-bold text-slate-700 mb-2">Recent Audit Log</h4>
+          <SimpleTable rows={state.auditLog.slice(0, 5)} columns={[
+            ["changedAt", "Changed", shortDate],
+            ["action", "Action"],
+            ["changedBy", "User"],
+            ["reason", "Reason"],
+          ]} />
+        </div>
+      </div>
+      <h4 className="text-sm font-bold text-slate-700 mt-5 mb-2">Stored Rate History</h4>
+      <SimpleTable rows={state.rates.slice(0, 8)} columns={[
+        ["effectiveFromDate", "From"],
+        ["effectiveToDate", "To"],
+        ["bankRate", "Bank Rate", (value) => `${value}%`],
+        ["sourceType", "Source"],
+        ["fetchedAt", "Fetched", shortDate],
+      ]} />
+    </div>
   );
 }
 
@@ -709,8 +817,8 @@ function HeaderBlock({ title, subtitle, action }) {
   return (
     <div className="flex items-start justify-between gap-4 flex-wrap">
       <div>
-        <h2 className="text-2xl font-bold text-slate-900">{title}</h2>
-        <p className="text-sm text-slate-500 mt-1 max-w-4xl">{subtitle}</p>
+        <h2 className="text-2xl font-bold text-white drop-shadow-sm">{title}</h2>
+        <p className="text-sm text-teal-50 mt-1 max-w-4xl font-medium drop-shadow-sm">{subtitle}</p>
       </div>
       {action}
     </div>

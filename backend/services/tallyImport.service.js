@@ -5,6 +5,7 @@ const { enrichCreditorsWithVoucherAging } = require("./payableAging.service");
 const { attachLedgerMetadata, buildStatementBundle, deriveSundryCreditors } = require("./financialStatements.service");
 const { splitIntoFinancialYearPeriods } = require("../utils/financialYear");
 const { normalizeVendorName } = require("../utils/normalizeVendorName");
+const { hasReportableUdyam } = require("./msmeRuleEngine.service");
 
 function buildVerificationSummary(creditors) {
   const total = creditors.length;
@@ -12,20 +13,24 @@ function buildVerificationSummary(creditors) {
     row.vendorMaster?.isMSME &&
     ["verified", "approved"].includes(row.vendorMaster?.udyamStatus)
   ).length;
+  const reportableMSME = creditors.filter((row) => hasReportableUdyam(row.vendorMaster)).length;
   const nonMSME = creditors.filter((row) => row.vendorMaster?.verificationStatus === "not_msme").length;
   const failed = creditors.filter((row) =>
     ["failed", "manual_fallback_required", "pending_manual_review", "rejected"].includes(row.vendorMaster?.udyamStatus)
   ).length;
-  const pendingVerification = total - verifiedMSME - nonMSME - failed;
-  return { total, verifiedMSME, pendingVerification, nonMSME, failedVerification: failed };
+  const pendingVerification = total - Math.max(verifiedMSME, reportableMSME) - nonMSME - failed;
+  return { total, verifiedMSME: Math.max(verifiedMSME, reportableMSME), pendingVerification: Math.max(pendingVerification, 0), nonMSME, failedVerification: failed };
 }
 
 function enrichCreditors(creditors) {
-  const master = vendorRepository.findManyByNames(creditors.map((creditor) => creditor.party));
+  const master = vendorRepository.getAllVendors();
   const masterByNormalized = new Map(master.map((vendor) => [vendor.normalizedVendorName, vendor]));
+  const masterByPan = new Map(master.filter((vendor) => vendor.panNumber).map((vendor) => [String(vendor.panNumber).toUpperCase(), vendor]));
   return creditors.map((creditor) => ({
     ...creditor,
-    vendorMaster: masterByNormalized.get(creditor.normalizedVendorName) || null,
+    vendorMaster: masterByNormalized.get(creditor.normalizedVendorName)
+      || masterByPan.get(String(creditor.panNumber || "").toUpperCase())
+      || null,
   }));
 }
 
@@ -151,6 +156,146 @@ function creditorRowsFromDaybook({ ledgerMetadata, ledgerVouchers, asOn }) {
     disallowanceAmount: 0,
     oldestInvoiceDate: "",
   }));
+}
+
+function tokenScore(left, right) {
+  const leftTokens = new Set(String(left || "").split(/\s+/).filter((token) => token.length > 2));
+  const rightTokens = new Set(String(right || "").split(/\s+/).filter((token) => token.length > 2));
+  if (!leftTokens.size || !rightTokens.size) return 0;
+  const common = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return common / Math.max(leftTokens.size, rightTokens.size);
+}
+
+function creditorRowFromLedger({ ledger, vendorMaster, asOn }) {
+  const payableOutstanding = Math.max(
+    Number(ledger.ledgerPayableOutstanding || 0),
+    -Number(ledger.closingBalance || 0),
+    Number(ledger.outstandingAmount || 0),
+    0
+  );
+  return {
+    party: ledger.name || ledger.ledgerName || vendorMaster.vendorName,
+    normalizedVendorName: ledger.normalizedName || normalizeVendorName(ledger.name || ledger.ledgerName || vendorMaster.vendorName),
+    outstandingAmount: Math.round(payableOutstanding * 100) / 100,
+    openingBalance: ledger.openingBalance || 0,
+    closingBalance: ledger.closingBalance || -payableOutstanding,
+    openingBalanceRaw: ledger.openingBalanceRaw || "",
+    closingBalanceRaw: ledger.closingBalanceRaw || "",
+    openingBalanceType: "",
+    closingBalanceType: payableOutstanding > 0 ? "credit" : "zero",
+    payableBalance: payableOutstanding > 0,
+    guid: ledger.guid || "",
+    gstin: ledger.gstin || "",
+    panNumber: ledger.panNumber || vendorMaster.panNumber || "",
+    udyamNumber: vendorMaster.udyamNumber || "",
+    detectionReasons: ["uploaded_udyam_metadata_match"],
+    validationFlags: ["RECOVERED_FROM_UPLOADED_UDYAM_MATCH"],
+    groupHierarchy: ledger.groupHierarchy || ["Sundry Creditors"],
+    parent: ledger.parent || "Sundry Creditors",
+    raw: { ...(ledger.raw || ledger), asOn, recoveredFromUploadedUdyam: true },
+    daysOutstanding: null,
+    bucket: "Unknown",
+    delayed: false,
+    interestLiability: 0,
+    disallowanceAmount: 0,
+    oldestInvoiceDate: "",
+  };
+}
+
+function creditorRowFromTargetedVouchers({ vendorMaster, vouchers, asOn }) {
+  const debit = vouchers.reduce((sum, row) => sum + Number(row.debit || 0), 0);
+  const credit = vouchers.reduce((sum, row) => sum + Number(row.credit || 0), 0);
+  const voucherOutstanding = Math.max(credit - debit, 0);
+  return {
+    party: vendorMaster.vendorName,
+    normalizedVendorName: vendorMaster.normalizedVendorName,
+    outstandingAmount: Math.round(voucherOutstanding * 100) / 100,
+    openingBalance: 0,
+    closingBalance: -voucherOutstanding,
+    openingBalanceRaw: "",
+    closingBalanceRaw: "",
+    openingBalanceType: "",
+    closingBalanceType: voucherOutstanding > 0 ? "credit" : "zero",
+    payableBalance: voucherOutstanding > 0,
+    guid: "",
+    gstin: "",
+    panNumber: vendorMaster.panNumber || "",
+    udyamNumber: vendorMaster.udyamNumber || "",
+    detectionReasons: ["targeted_uploaded_udyam_ledger_vouchers"],
+    validationFlags: ["TARGETED_LEDGER_LOOKUP", "VOUCHER_ONLY_OUTSTANDING"],
+    groupHierarchy: ["Sundry Creditors"],
+    parent: "Sundry Creditors",
+    raw: { asOn, recoveredFromUploadedUdyam: true, targetedLedgerVoucherCount: vouchers.length },
+    daysOutstanding: null,
+    bucket: "Unknown",
+    delayed: false,
+    interestLiability: 0,
+    disallowanceAmount: 0,
+    oldestInvoiceDate: "",
+  };
+}
+
+async function recoverUploadedUdyamCreditors({ creditors, ledgerMetadata, ledgerVoucherRows, financialYearPeriods, companyName, asOn, runId }) {
+  const creditorByName = new Map(creditors.map((creditor) => [creditor.normalizedVendorName, creditor]));
+  const allVendors = vendorRepository.getAllVendors().filter(hasReportableUdyam);
+  const recoveredCreditors = [];
+  const recoveredVouchers = [];
+  for (const vendor of allVendors) {
+    if (creditorByName.has(vendor.normalizedVendorName)) continue;
+    const metadataMatch = ledgerMetadata.find((ledger) => {
+      const ledgerName = ledger.normalizedName || normalizeVendorName(ledger.name || ledger.ledgerName);
+      const panMatches = vendor.panNumber && String(ledger.panNumber || "").toUpperCase() === String(vendor.panNumber).toUpperCase();
+      return ledgerName === vendor.normalizedVendorName || panMatches || tokenScore(ledgerName, vendor.normalizedVendorName) >= 0.8;
+    });
+    if (metadataMatch) {
+      const recovered = creditorRowFromLedger({ ledger: metadataMatch, vendorMaster: vendor, asOn });
+      if (recovered.outstandingAmount > 0) {
+        logImportStage("uploadedUdyamRecovery", { status: "metadata_match", runId, vendorName: vendor.vendorName, ledgerName: recovered.party, outstandingAmount: recovered.outstandingAmount });
+        recoveredCreditors.push(recovered);
+        creditorByName.set(recovered.normalizedVendorName, recovered);
+        continue;
+      }
+    }
+    const targetPeriods = financialYearPeriods.length ? financialYearPeriods : [{ reportFromDate: "", reportToDate: "" }];
+    const vendorRows = [];
+    for (const fyPeriod of targetPeriods) {
+      try {
+        const rows = await tallyService.fetchLedgerVouchers({
+          ledgerName: vendor.vendorName,
+          from: fyPeriod.reportFromDate,
+          to: fyPeriod.reportToDate,
+          companyName,
+        });
+        vendorRows.push(...rows.map((row) => ({
+          ...row,
+          financialYear: fyPeriod.financialYear,
+          fyStartDate: fyPeriod.fyStartDate,
+          fyEndDate: fyPeriod.fyEndDate,
+          reportFromDate: fyPeriod.reportFromDate,
+          reportToDate: fyPeriod.reportToDate,
+          asOnDate: fyPeriod.asOnDate || asOn,
+          voucherSource: "Targeted Ledger Vouchers",
+        })));
+      } catch (error) {
+        logImportStage("uploadedUdyamRecovery", { status: "targeted_lookup_failed", runId, vendorName: vendor.vendorName, error: error.message });
+      }
+    }
+    if (vendorRows.length) {
+      const recovered = creditorRowFromTargetedVouchers({ vendorMaster: vendor, vouchers: vendorRows, asOn });
+      if (recovered.outstandingAmount > 0) {
+        logImportStage("uploadedUdyamRecovery", { status: "targeted_lookup_match", runId, vendorName: vendor.vendorName, rows: vendorRows.length, outstandingAmount: recovered.outstandingAmount });
+        recoveredCreditors.push(recovered);
+        recoveredVouchers.push(...vendorRows);
+        creditorByName.set(recovered.normalizedVendorName, recovered);
+      }
+    }
+  }
+  return {
+    creditors: [...creditors, ...recoveredCreditors],
+    ledgerVoucherRows: [...ledgerVoucherRows, ...recoveredVouchers],
+    recoveredCount: recoveredCreditors.length,
+    recoveredVoucherCount: recoveredVouchers.length,
+  };
 }
 
 function countCreditorImpactRows(rows = [], creditors = []) {
@@ -312,7 +457,23 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
       voucherSource: [...new Set(dayBookResults.map((result) => result.voucherSource).filter(Boolean))].join(" + ") || "Voucher Collection",
       fallbackUsed: dayBookResults.some((result) => result.fallbackUsed),
     };
-    const ledgerVoucherRows = attachLedgerMetadata(dayBookResult.rows, ledgerMetadataResult.ledgers);
+    let ledgerVoucherRows = attachLedgerMetadata(dayBookResult.rows, ledgerMetadataResult.ledgers);
+    let importedCreditors = creditorRowsFromDaybook({
+      ledgerMetadata: ledgerMetadataResult.ledgers,
+      ledgerVouchers: ledgerVoucherRows,
+      asOn: selectedAsOn,
+    });
+    const recovery = await recoverUploadedUdyamCreditors({
+      creditors: importedCreditors,
+      ledgerMetadata: ledgerMetadataResult.ledgers,
+      ledgerVoucherRows,
+      financialYearPeriods,
+      companyName: selectedCompanyName,
+      asOn: selectedAsOn,
+      runId,
+    });
+    importedCreditors = recovery.creditors;
+    ledgerVoucherRows = recovery.ledgerVoucherRows;
     const statements = buildStatementBundle(ledgerVoucherRows, ledgerMetadataResult.ledgers);
     const data = {
       success: true,
@@ -330,13 +491,12 @@ async function importFromTally({ periodType = "financial_year", fiscalYear, from
           detectedCreditorCount: statements.sundryCreditors.length,
           zeroDebitCreditorsWithActivity: statements.summary.zeroDebitCreditorsWithActivity,
         },
-        warnings: dayBookResult.warnings,
+        warnings: [
+          ...dayBookResult.warnings,
+          ...(recovery.recoveredCount ? [`Recovered ${recovery.recoveredCount} uploaded Udyam creditor(s) from metadata/targeted ledger lookup.`] : []),
+        ],
       },
-      creditors: creditorRowsFromDaybook({
-        ledgerMetadata: ledgerMetadataResult.ledgers,
-        ledgerVouchers: ledgerVoucherRows,
-        asOn: selectedAsOn,
-      }),
+      creditors: importedCreditors,
     };
     logImportStage("companyDetect", {
       status: "ledger_metadata_selected",

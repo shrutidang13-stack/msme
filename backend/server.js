@@ -12,6 +12,7 @@ const legalRoutes = require("./routes/legalRoutes");
 const msmeRoutes = require("./routes/msmeRoutes");
 const mcaMsme1Routes = require("./routes/mcaMsme1Routes");
 const taxAuditRoutes = require("./routes/taxAuditRoutes");
+const rbiBankRateRoutes = require("./routes/rbiBankRateRoutes");
 const { requireAuth } = require("./middleware/auth");
 
 const app = express();
@@ -34,6 +35,7 @@ app.use("/api", legalRoutes);
 app.use("/api", msmeRoutes);
 app.use("/api", mcaMsme1Routes);
 app.use("/api", taxAuditRoutes);
+app.use("/api", rbiBankRateRoutes);
 app.use("/api/ai", aiRoutes);
 
 app.get("/", (req, res) => {

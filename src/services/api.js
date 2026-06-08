@@ -229,6 +229,28 @@ export async function fetchLegalRules() {
   return request("/api/legal/rules");
 }
 
+export async function fetchRbiBankRates() {
+  return request("/api/admin/rbi-bank-rates");
+}
+
+export async function updateRbiBankRates() {
+  return request("/api/admin/rbi-bank-rates/update", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function createRbiBankRateOverride(payload) {
+  return request("/api/admin/rbi-bank-rates/manual-override", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchRbiBankRateAuditLog() {
+  return request("/api/admin/rbi-bank-rates/audit-log");
+}
+
 export async function saveVendorStatus(payload) {
   return request("/api/vendors/save-status", {
     method: "POST",
