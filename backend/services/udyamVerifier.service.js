@@ -4,6 +4,7 @@ const { execFile } = require("child_process");
 const { promisify } = require("util");
 const puppeteer = require("puppeteer");
 const env = require("../config/env");
+const { preferSeleniumManagerChromeDriver } = require("../utils/seleniumChromeDriver");
 
 const UDYAM_FORMAT = /^UDYAM-([A-Z]{2})-(\d{2})-(\d{7})$/i;
 const execFileAsync = promisify(execFile);
@@ -99,9 +100,9 @@ async function verifyOnceWithSelenium(udyamNumber, attempt) {
   let webdriver;
   let chrome;
   try {
+    preferSeleniumManagerChromeDriver();
     webdriver = require("selenium-webdriver");
     chrome = require("selenium-webdriver/chrome");
-    require("chromedriver");
   } catch (error) {
     return {
       verified: false,

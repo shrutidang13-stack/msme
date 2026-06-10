@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MCA_MSME_FORM_1>
+  <Company>
+    <CIN>U34100UP2021PTC156494</CIN>
+    <PAN>AAHCN9637N</PAN>
+    <Name>NXTMOBILITY ENERGY PRIVATE LIMITED</Name>
+  </Company>
+  <Period>
+    <FiscalYear>2026-27</FiscalYear>
+    <HalfYear>apr-sep</HalfYear>
+    <Label>April-September</Label>
+  </Period>
+  <Suppliers>
+    <Supplier serial="1">
+      <Name>HLSL LOGISTICS</Name>
+      <PAN>ABDPC3741L</PAN>
+      <UdyamNumber>UDYAM-RJ-33-0006759</UdyamNumber>
+      <PaidWithin45>0.00</PaidWithin45>
+      <PaidAfter45>0.00</PaidAfter45>
+      <Outstanding45OrLess>3436529.36</Outstanding45OrLess>
+      <OutstandingMoreThan45>0.00</OutstandingMoreThan45>
+      <PrincipalOutstanding>3436529.36</PrincipalOutstanding>
+      <DelayDays>0</DelayDays>
+      <Section16Interest>0.00</Section16Interest>
+      <ReasonForDelay>Agreed Payment terms</ReasonForDelay>
+    </Supplier>
+    <Supplier serial="2">
+      <Name>SMOBILITY EV TECH PRIVATE LIMITED</Name>
+      <PAN>ABHCS9206K</PAN>
+      <UdyamNumber>UDYAM-KR-03-0292083</UdyamNumber>
+      <PaidWithin45>0.00</PaidWithin45>
+      <PaidAfter45>0.00</PaidAfter45>
+      <Outstanding45OrLess>0.00</Outstanding45OrLess>
+      <OutstandingMoreThan45>2961808.00</OutstandingMoreThan45>
+      <PrincipalOutstanding>2961808.00</PrincipalOutstanding>
+      <DelayDays>8</DelayDays>
+      <Section16Interest>9411.98</Section16Interest>
+      <ReasonForDelay>Agreed Payment terms</ReasonForDelay>
+    </Supplier>
+    <Supplier serial="3">
+      <Name>Galvanic Infotech Pvt Ltd</Name>
+      <PAN>AADCG2211M</PAN>
+      <UdyamNumber>UDYAM-UP-28-0100619</UdyamNumber>
+      <PaidWithin45>0.00</PaidWithin45>
+      <PaidAfter45>0.00</PaidAfter45>
+      <Outstanding45OrLess>111156.00</Outstanding45OrLess>
+      <OutstandingMoreThan45>0.00</OutstandingMoreThan45>
+      <PrincipalOutstanding>111156.00</PrincipalOutstanding>
+      <DelayDays>0</DelayDays>
+      <Section16Interest>0.00</Section16Interest>
+      <ReasonForDelay>Agreed Payment terms</ReasonForDelay>
+    </Supplier>
+    <Supplier serial="4">
+      <Name>Ahom Logistics Private Limited</Name>
+      <PAN>AAVCA4739L</PAN>
+      <UdyamNumber>UDYAM-DL-08-0020373</UdyamNumber>
+      <PaidWithin45>0.00</PaidWithin45>
+      <PaidAfter45>0.00</PaidAfter45>
+      <Outstanding45OrLess>0.00</Outstanding45OrLess>
+      <OutstandingMoreThan45>12525.40</OutstandingMoreThan45>
+      <PrincipalOutstanding>12525.40</PrincipalOutstanding>
+      <DelayDays>8</DelayDays>
+      <Section16Interest>32.71</Section16Interest>
+      <ReasonForDelay>Agreed Payment terms</ReasonForDelay>
+    </Supplier>
+    <Supplier serial="5">
+      <Name>AMBIT TRANSMISSION PRODUCT PVT LTD</Name>
+      <PAN>AATCA2612E</PAN>
+      <UdyamNumber>UDYAM-DL-02-0014912</UdyamNumber>
+      <PaidWithin45>0.00</PaidWithin45>
+      <PaidAfter45>0.00</PaidAfter45>
+      <Outstanding45OrLess>10175.00</Outstanding45OrLess>
+      <OutstandingMoreThan45>0.00</OutstandingMoreThan45>
+      <PrincipalOutstanding>10175.00</PrincipalOutstanding>
+      <DelayDays>0</DelayDays>
+      <Section16Interest>0.00</Section16Interest>
+      <ReasonForDelay>Agreed Payment terms</ReasonForDelay>
+    </Supplier>
+  </Suppliers>
+  <Totals>
+    <PaidWithin45>0.00</PaidWithin45>
+    <PaidAfter45>0.00</PaidAfter45>
+    <Outstanding45OrLess>3557860.36</Outstanding45OrLess>
+    <OutstandingMoreThan45>2974333.40</OutstandingMoreThan45>
+    <PrincipalOutstanding>6532193.76</PrincipalOutstanding>
+    <Section16Interest>9444.69</Section16Interest>
+  </Totals>
+</MCA_MSME_FORM_1>

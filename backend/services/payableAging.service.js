@@ -258,6 +258,8 @@ function buildPayableAgingFromVouchers(vouchers = [], asOn, options = {}) {
         interest: due.interest,
         bankRatePercent: due.bankRatePercent,
         annualInterestRatePercent: due.annualInterestRatePercent,
+        interestRateSource: due.interestRateSource,
+        ratePeriods: due.ratePeriods,
         verificationRequired: Boolean(invoice.verificationRequired || due.verificationRequired),
         verificationFlags: Array.from(new Set([...(invoice.verificationFlags || []), ...(due.verificationFlags || [])])),
       };
@@ -367,6 +369,8 @@ function buildLedgerOnlyAging(creditor, asOn, options = {}) {
     interest: 0,
     bankRatePercent: due.bankRatePercent,
     annualInterestRatePercent: due.annualInterestRatePercent,
+    interestRateSource: due.interestRateSource,
+    ratePeriods: due.ratePeriods,
     verificationRequired: true,
     verificationFlags: estimationFlags,
     source: "Tally ledger closing balance",

@@ -6,6 +6,12 @@ const parseOrigins = (value) =>
     .map((origin) => origin.trim())
     .filter(Boolean);
 
+const parseCsv = (value) =>
+  String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+
 module.exports = {
   port: Number(process.env.PORT || 3001),
   allowedOrigins: parseOrigins(process.env.CORS_ORIGINS),
@@ -20,6 +26,7 @@ module.exports = {
   udyamOcrPython: process.env.UDYAM_OCR_PYTHON || "python",
   tallyAllowUnfilteredVoucherRetry: process.env.TALLY_ALLOW_UNFILTERED_VOUCHER_RETRY === "true",
   msmeBankRatePercent: Number(process.env.MSME_BANK_RATE_PERCENT || 5.5),
+  rbiCurrentRateUrls: parseCsv(process.env.RBI_CURRENT_RATE_URLS),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || "",
   anthropicChatModel: process.env.ANTHROPIC_CHAT_MODEL || "claude-sonnet-4-20250514",
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || "msme-guard",

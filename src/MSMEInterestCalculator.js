@@ -9,7 +9,8 @@ const initialForm = {
   asOnDate: new Date().toISOString().slice(0, 10),
   hasWrittenAgreement: "no",
   agreedPaymentDays: "",
-  annualInterestRate: "16.5",
+  useManualAnnualRate: false,
+  annualInterestRate: "",
 };
 
 function formatMoney(value) {
@@ -41,7 +42,7 @@ export default function MSMEInterestCalculator() {
       const response = await calculateMSMEInterest({
         ...form,
         hasWrittenAgreement: form.hasWrittenAgreement === "yes",
-        annualInterestRate: Number(form.annualInterestRate || 0) / 100,
+        ...(form.useManualAnnualRate ? { annualInterestRate: Number(form.annualInterestRate || 0) / 100 } : {}),
       });
       setResult(response.result);
     } catch (err) {
@@ -77,8 +78,17 @@ export default function MSMEInterestCalculator() {
               </select>
             </label>
             <Field label="Agreed Payment Days" type="number" value={form.agreedPaymentDays} onChange={(value) => update("agreedPaymentDays", value)} />
-            <Field label="Annual Interest Rate (%)" type="number" value={form.annualInterestRate} onChange={(value) => update("annualInterestRate", value)} />
+            <label className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+              <input type="checkbox" checked={form.useManualAnnualRate} onChange={(event) => update("useManualAnnualRate", event.target.checked)} />
+              Manual annual rate
+            </label>
+            <Field label="Annual Interest Rate (%)" type="number" value={form.annualInterestRate} onChange={(value) => update("annualInterestRate", value)} disabled={!form.useManualAnnualRate} />
           </div>
+          {form.useManualAnnualRate && (
+            <p className="mt-3 text-xs font-semibold text-amber-700">
+              Manual annual rate is a calculator-only override and does not replace official stored RBI Bank Rate history.
+            </p>
+          )}
           <div className="flex gap-2 mt-5">
             <button type="submit" disabled={loading} className="bg-blue-700 text-white px-5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
               {loading ? "Calculating..." : "Calculate Interest"}
@@ -100,9 +110,21 @@ export default function MSMEInterestCalculator() {
                 <ResultMetric label="Days Outstanding" value={result.daysOutstanding} />
                 <ResultMetric label="Allowed Days" value={result.allowedPaymentDays} />
                 <ResultMetric label="Appointed Day" value={result.appointedDay || "N/A"} />
+                <ResultMetric label="Bank Rate" value={`${result.bankRatePercent}%`} />
+                <ResultMetric label="Annual Rate" value={`${result.annualInterestRatePercent}%`} />
+                <ResultMetric label="Rate Source" value={result.interestRateSource || "N/A"} />
                 <ResultMetric label="Interest" value={`Rs ${formatMoney(result.interest)}`} />
                 <ResultMetric label="Total Payable" value={`Rs ${formatMoney(result.totalPayable)}`} />
               </div>
+              {result.ratePeriods?.length > 0 && (
+                <div className="bg-gray-50 rounded-lg p-3 text-xs text-gray-600 space-y-1">
+                  {result.ratePeriods.map((period, index) => (
+                    <p key={`${period.fromDate}-${index}`}>
+                      {period.fromDate} to {period.toDate}: Bank Rate {period.bankRatePercent}% from {period.sourceType}
+                    </p>
+                  ))}
+                </div>
+              )}
               <p className="text-xs text-gray-500">{result.legalNote}</p>
             </div>
           )}
@@ -112,7 +134,7 @@ export default function MSMEInterestCalculator() {
   );
 }
 
-function Field({ label, value, onChange, type = "text", required = false }) {
+function Field({ label, value, onChange, type = "text", required = false, disabled = false }) {
   return (
     <label className="block">
       <span className="block text-xs font-semibold text-gray-700 mb-1">{label}</span>
@@ -120,9 +142,10 @@ function Field({ label, value, onChange, type = "text", required = false }) {
         type={type}
         value={value}
         required={required}
+        disabled={disabled}
         step={type === "number" ? "0.01" : undefined}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm"
+        className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm disabled:bg-gray-100 disabled:text-gray-400"
       />
     </label>
   );

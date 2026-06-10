@@ -5,6 +5,11 @@ import { signOut } from "firebase/auth";
 import TallyImport from "./TallyImport";
 import MCAMSME1Filing from "./MCAMSME1Filing";
 import TaxAuditReportGenerator from "./TaxAuditReportGenerator";
+import AuditEvidencePackButton from "./components/AuditEvidencePackButton";
+import ComplianceExplanationPanel from "./components/ComplianceExplanationPanel";
+import ComplianceRiskScore from "./components/ComplianceRiskScore";
+import PaymentRecommendationPanel from "./components/PaymentRecommendationPanel";
+import PaymentWhatIfSimulator from "./components/PaymentWhatIfSimulator";
 import {
   askComplianceAssistant,
   createMSMEReport,
@@ -40,7 +45,9 @@ const POWERBI_EMBED_URL = process.env.REACT_APP_POWERBI_EMBED_URL || "";
 
 export default function Dashboard({ user }) {
   const [activeTab, setActiveTab] = useState("dashboard");
+  const [displayResetVersion, setDisplayResetVersion] = useState(0);
   const handleLogout = async () => { await signOut(auth); };
+  const clearDisplayData = () => setDisplayResetVersion((version) => version + 1);
 
   return (
     <div className="min-h-screen app-shell-bg">
@@ -65,15 +72,15 @@ export default function Dashboard({ user }) {
         ))}
       </div>
       <main className="p-4 md:p-6 max-w-[1500px] mx-auto">
-        {activeTab === "dashboard" && <Home setActiveTab={setActiveTab} />}
+        {activeTab === "dashboard" && <Home setActiveTab={setActiveTab} displayResetVersion={displayResetVersion} />}
         <section hidden={activeTab !== "tally"}>
-          <TallyImport />
+          <TallyImport onClearDisplay={clearDisplayData} />
         </section>
         {activeTab === "compliance" && <ComplianceReportSection />}
         {activeTab === "clause22" && <Clause22Section />}
         {activeTab === "clause26" && <Clause26Section />}
-        {activeTab === "mca-msme1" && <MCAMSME1Filing />}
-        {activeTab === "tax-audit" && <TaxAuditReportGenerator />}
+        {activeTab === "mca-msme1" && <MCAMSME1Filing displayResetVersion={displayResetVersion} />}
+        {activeTab === "tax-audit" && <TaxAuditReportGenerator displayResetVersion={displayResetVersion} />}
         {activeTab === "rules" && <Rules />}
         {activeTab === "settings" && <Settings />}
         {activeTab === "ai" && <AIAssistant />}
@@ -82,8 +89,8 @@ export default function Dashboard({ user }) {
   );
 }
 
-function Home({ setActiveTab }) {
-  const data = useDashboardData();
+function Home({ setActiveTab, displayResetVersion = 0 }) {
+  const data = useDashboardData(displayResetVersion);
   const latestReport = data.reports[0];
   const latestImport = data.imports.find((row) => row.status === "completed") || data.imports[0];
   const vendorStats = vendorSummary(data.vendors);
@@ -107,6 +114,12 @@ function Home({ setActiveTab }) {
       <div className="grid sm:grid-cols-2 xl:grid-cols-6 gap-3">
         {pipeline.map((metric) => <Metric key={metric.label} {...metric} />)}
       </div>
+      {latestReport && (
+        <div className="grid xl:grid-cols-[0.9fr_1.1fr] gap-5">
+          <ComplianceRiskScore reportId={latestReport.id} />
+          <PaymentRecommendationPanel reportId={latestReport.id} compact />
+        </div>
+      )}
       <div className="grid xl:grid-cols-[1.2fr_0.8fr] gap-5">
         <Panel title="Power BI Data Board" subtitle={POWERBI_EMBED_URL ? "Live embedded Power BI report." : "Configured from local Tally/report data. Set REACT_APP_POWERBI_EMBED_URL to embed Power BI."}>
           {POWERBI_EMBED_URL ? (
@@ -284,8 +297,17 @@ function ComplianceReportSection() {
             <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("CSV", () => downloadReportFile(report.id, "csv"))} className="bg-slate-900 text-white px-4 py-2 rounded-md text-sm font-semibold disabled:opacity-50">{downloadingReport === "CSV" ? "Starting..." : "Download CSV"}</button>
             <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("XML", () => downloadReportFile(report.id, "xml"))} className="bg-slate-100 text-slate-800 px-4 py-2 rounded-md text-sm font-semibold disabled:opacity-50">{downloadingReport === "XML" ? "Starting..." : "Download XML"}</button>
             <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("Evidence Bundle", () => downloadUrl(reportEvidenceBundleUrl(report.id), `MSME_Evidence_Bundle_${report.id}.zip`))} className="bg-slate-800 text-white px-4 py-2 rounded-md text-sm font-semibold disabled:opacity-50">{downloadingReport === "Evidence Bundle" ? "Starting..." : "Evidence Bundle"}</button>
+            <AuditEvidencePackButton reportId={report.id} />
             <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("Reconciliation", () => downloadUrl(reportTallyReconciliationUrl(report.id), `MSME_Tally_Reconciliation_${report.id}.csv`))} className="bg-slate-100 text-slate-800 px-4 py-2 rounded-md text-sm font-semibold disabled:opacity-50">{downloadingReport === "Reconciliation" ? "Starting..." : "Reconciliation"}</button>
             <button onClick={() => exportVendorWise(rows, `MSME_Vendor_Wise_${report.fiscalYear}.xlsx`)} className="bg-slate-100 text-slate-800 px-4 py-2 rounded-md text-sm font-semibold">Vendor-wise Excel</button>
+          </div>
+          <div className="grid xl:grid-cols-[0.9fr_1.1fr] gap-4 mb-5">
+            <ComplianceRiskScore reportId={report.id} />
+            <PaymentRecommendationPanel reportId={report.id} compact />
+          </div>
+          <div className="grid xl:grid-cols-2 gap-4 mb-5">
+            <PaymentWhatIfSimulator report={report} />
+            <ComplianceExplanationPanel reportId={report.id} />
           </div>
           <SchedulePreview schedules={schedules} />
           <h3 className="text-sm font-bold text-slate-700 mt-5 mb-2">Included verified MSME vendors</h3>
@@ -659,9 +681,13 @@ function AIAssistant() {
   );
 }
 
-function useDashboardData() {
+function useDashboardData(displayResetVersion = 0) {
   const [state, setState] = useState({ vendors: [], reports: [], imports: [], filings: [], error: "" });
   useEffect(() => {
+    if (displayResetVersion > 0) {
+      setState({ vendors: [], reports: [], imports: [], filings: [], error: "" });
+      return undefined;
+    }
     let alive = true;
     Promise.all([fetchVendorMaster(), fetchReports(), fetchImports(), fetchMcaMsme1Filings().catch(() => ({ filings: [] }))])
       .then(([vendors, reports, imports, filings]) => {
@@ -676,7 +702,7 @@ function useDashboardData() {
       })
       .catch((err) => alive && setState((prev) => ({ ...prev, error: err.message })));
     return () => { alive = false; };
-  }, []);
+  }, [displayResetVersion]);
   return state;
 }
 

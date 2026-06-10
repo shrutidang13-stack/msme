@@ -44,7 +44,26 @@ const taxAuditSchemaService = require("../services/taxAuditSchema.service");
 const taxAuditReportService = require("../services/taxAuditReport.service");
 const carryForwardService = require("../services/carryForward.service");
 const rbiBankRateService = require("../services/rbiBankRate.service");
+const complianceRiskScoreService = require("../services/complianceRiskScore.service");
+const paymentRecommendationService = require("../services/paymentRecommendation.service");
+const paymentSimulatorService = require("../services/paymentSimulator.service");
+const complianceExplanationService = require("../services/complianceExplanation.service");
+const auditEvidencePackService = require("../services/auditEvidencePack.service");
+const mcaFilingAutomationService = require("../services/mcaMsme1FilingAutomation.service");
 const db = require("../config/database");
+
+function seedTestBankRate({ id = "unit-test-default-rbi-rate", from = "2020-01-01", to = null, rate = 5.5 } = {}) {
+  db.prepare(`
+    INSERT OR IGNORE INTO rbi_bank_rates (
+      id, effective_from_date, effective_to_date, bank_rate, source_url, downloaded_pdf_path,
+      source_type, is_manual_override, override_reason, created_by, fetched_at, created_at
+    ) VALUES (?, ?, ?, ?, 'unit_test_seed', '', 'official_fetch', 0, '', 'unit-test', '2026-06-09T00:00:00.000Z', '2026-06-09T00:00:00.000Z')
+  `).run(id, from, to, rate);
+}
+
+test.before(() => {
+  seedTestBankRate();
+});
 
 function withMockTally(handler) {
   return new Promise((resolve, reject) => {
@@ -1489,7 +1508,7 @@ test("MSME report uses persisted vouchers for payable aging", () => {
   assert.equal(report.summary.actualPaymentRuleId, "ITA-2025-ACTUAL-PAYMENT-037");
   assert.equal(report.summary.bankRatePercent, 5.5);
   assert.equal(report.summary.annualInterestRatePercent, 16.5);
-  assert.equal(report.summary.interestRateSource, "config_fallback");
+  assert.equal(report.summary.interestRateSource, "official_fetch");
   assert.equal(report.summary.voucherSource, "Voucher Collection");
   assert.equal(report.summary.fallbackUsed, true);
   assert.equal(report.summary.vouchersPersisted, 2);
@@ -1497,7 +1516,7 @@ test("MSME report uses persisted vouchers for payable aging", () => {
   assert.equal(report.report[0].vendorName, "Report Aging Supplier");
   assert.equal(report.report[0].outstandingAmount, 999);
   assert.equal(report.report[0].daysOutstanding, 61);
-  assert.equal(report.report[0].delayDays, 46);
+  assert.equal(report.report[0].delayDays, 45);
   assert.equal(report.report[0].disallowed, 600);
   assert.equal(report.report[0].appliedRules.includes("ITA-ACTUAL-PAYMENT-037"), false);
   assert.equal(report.report[0].appliedRules.includes("ITA-2025-ACTUAL-PAYMENT-037"), true);
@@ -2182,7 +2201,7 @@ test("payable aging trusts voucher type before debit credit polarity for Tally l
   assert.equal(aging[0].invoiceCount, 1);
   assert.equal(aging[0].paymentCount, 1);
   assert.equal(aging[0].outstandingAmount, 750);
-  assert.equal(aging[0].allInvoices[0].delayDays, 22);
+  assert.equal(aging[0].allInvoices[0].delayDays, 21);
   assert.equal(aging[0].allInvoices[0].exposure43Bh, 750);
 });
 
@@ -2214,7 +2233,7 @@ test("payable aging includes paid-late invoices as audit evidence", () => {
   assert.equal(aging[0].outstandingAmount, 0);
   assert.equal(aging[0].paidLateInvoiceCount, 1);
   assert.equal(aging[0].paidLateAmount, 1000);
-  assert.equal(aging[0].paidLateInvoices[0].delayDays, 44);
+  assert.equal(aging[0].paidLateInvoices[0].delayDays, 43);
   assert.ok(aging[0].interest > 0);
 });
 
@@ -2313,7 +2332,7 @@ test("payable aging computes partial payment, pending amount, overdue days, and 
   assert.equal(aging[0].exposure43Bh, 600);
   assert.equal(aging[0].invoices[0].paidAmount, 400);
   assert.equal(aging[0].invoices[0].pendingAmount, 600);
-  assert.equal(aging[0].invoices[0].delayDays, 46);
+  assert.equal(aging[0].invoices[0].delayDays, 45);
 });
 
 test("payable aging keeps ledger outstanding amount and exposes voucher amount separately", () => {
@@ -2510,6 +2529,100 @@ test("report includes only verified MSME vendors", () => {
   assert.match(csv, /Voucher-only Outstanding/);
   assert.match(csv, /ABCDE1234F/);
   assert.match(csv, /1600\.00/);
+});
+
+test("compliance command center services consume persisted report data", async () => {
+  const runId = importRepository.createRun({
+    fiscalYear: "2026-27",
+    fromDate: "20260401",
+    toDate: "20270331",
+    asOn: "2026-06-05",
+    companyName: "Command Center Test Co",
+    status: "running",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, {
+    summary: { fiscalYear: "2026-27", companyName: "Command Center Test Co" },
+    creditors: [],
+    ledgerVouchers: [],
+  });
+  const saved = reportRepository.createReport({
+    importRunId: runId,
+    fiscalYear: "2026-27",
+    actor: "unit-test",
+    summary: {
+      reportVendors: 2,
+      pendingVerificationVendors: 1,
+      totalDisallowed: 1500,
+      totalInterest: 55,
+      asOnDate: "2026-06-05",
+      applicableAct: "Income Tax Act, 2025",
+      applicableSection: "Section 37(2)(g)",
+    },
+    report: {
+      included: [
+        {
+          vendorName: "Command Supplier",
+          udyamNumber: "UDYAM-DL-01-1234567",
+          enterpriseType: "Micro",
+          ledgerOutstandingAmount: 1500,
+          outstandingAmount: 1500,
+          disallowed: 1500,
+          principalDisallowance43Bh: 1500,
+          interest: 55,
+          delayDays: 20,
+        },
+      ],
+      excluded: [{ vendorName: "Pending Supplier", reason: "evidence_pending" }],
+      schedules: {
+        invoiceAging: [{
+          vendorName: "Command Supplier",
+          invoiceNumber: "CMD-1",
+          invoiceDate: "2026-04-01",
+          dueDate: "2026-05-16",
+          appointedDay: "2026-05-16",
+          unpaidAmount: 1500,
+          pendingAmount: 1500,
+          principalAmount: 1500,
+          exposure43Bh: 1500,
+          delayDays: 20,
+          daysDelayed: 20,
+          interest: 55,
+          interestAmount: 55,
+          allowedPaymentDays: 45,
+          agreedPaymentDays: 45,
+        }],
+        verificationRequired: [{ vendorName: "Pending Supplier", issueType: "evidence" }],
+        mcaMsmeForm1Data: [{ supplierName: "Command Supplier", validationStatus: "ready" }],
+      },
+    },
+  });
+
+  const risk = complianceRiskScoreService.getRiskScore(saved.id);
+  assert.equal(risk.reportId, saved.id);
+  assert.equal(risk.score <= 100, true);
+  assert.equal(risk.topRisks.length > 0, true);
+
+  const recommendations = paymentRecommendationService.getPaymentRecommendations(saved.id);
+  assert.equal(recommendations.recommendations[0].vendorName, "Command Supplier");
+  assert.equal(recommendations.recommendations[0].priority, "Immediate");
+
+  const simulation = paymentSimulatorService.runPaymentSimulation({
+    reportId: saved.id,
+    scenario: "pay_all_overdue",
+    simulationDate: "2026-06-05",
+  });
+  assert.equal(simulation.simulationOnly, true);
+  assert.equal(simulation.disallowanceReduction, 1500);
+  assert.equal(simulation.outstandingExposureReduction, 1500);
+
+  const explanation = complianceExplanationService.explain({ reportId: saved.id, explanationType: "tax_impact" });
+  assert.match(explanation.outputText, /reviewed by a professional/i);
+  assert.match(explanation.outputText, /43B/i);
+
+  const pack = await auditEvidencePackService.buildAuditEvidencePack(saved.id, { includePdf: false });
+  assert.equal(pack.subarray(0, 4).toString("hex"), "504b0304");
+  assert.match(pack.toString("latin1"), /computed-report-backup\.json/);
 });
 
 test("MCA MSME-1 preview maps report rows to utility buckets and validates PAN", () => {
@@ -2746,6 +2859,72 @@ test("MCA MSME-1 Excel upload parser and XML generator validate supplier rows", 
   assert.ok(invalid.errors.some((error) => error.field === "reasonForDelay"));
 });
 
+test("MCA MSME-1 assisted filing automation validates readiness and captures manual SRN without secrets", async () => {
+  const runId = importRepository.createRun({
+    fiscalYear: "2025-26",
+    fromDate: "20250401",
+    toDate: "20260331",
+    asOn: "2026-03-31",
+    companyName: "Test Company",
+    status: "running",
+    actor: "unit-test",
+  });
+  importRepository.completeRun(runId, {
+    summary: { fiscalYear: "2025-26", companyName: "Test Company" },
+    creditors: [],
+    ledgerVouchers: [],
+  });
+  const report = reportRepository.createReport({
+    importRunId: runId,
+    fiscalYear: "2025-26",
+    summary: {},
+    report: {
+      included: [{
+        vendorName: "Automation Supplier",
+        normalizedVendorName: "AUTOMATION SUPPLIER",
+        panNumber: "ABCDE1234F",
+        udyamNumber: "UDYAM-DL-01-1234567",
+        ledgerOutstandingAmount: 1000,
+        outstandingAmount: 1000,
+        daysOutstanding: 90,
+        delayDays: 45,
+      }],
+      excluded: [],
+      schedules: {},
+    },
+    actor: "unit-test",
+  });
+  const generated = mcaMsme1Service.generate({ reportId: report.id, halfYear: "oct-mar", actor: "unit-test" });
+  assert.throws(
+    () => mcaFilingAutomationService.validateReadiness(generated.filing.id, {
+      mcaUserId: "user",
+      mcaPassword: "secret",
+      companyDetails: { cin: "", pan: "ABCDE1234F", companyName: "Test Company" },
+      signatoryId: "ABCDE1234F",
+    }),
+    /Company CIN, PAN and company name/
+  );
+  const ready = mcaFilingAutomationService.validateReadiness(generated.filing.id, {
+    mcaUserId: "user",
+    mcaPassword: "secret",
+    companyDetails: { cin: "U12345DL2020PLC123456", pan: "ABCDE1234F", companyName: "Test Company" },
+    signatoryId: "ABCDE1234F",
+  });
+  assert.equal(ready.id, generated.filing.id);
+  assert.deepEqual(mcaFilingAutomationService.halfYearDates("2025-26", "oct-mar"), { start: "01/10/2025", end: "31/03/2026" });
+  assert.equal(mcaFilingAutomationService.extractSrn("Payment successful. SRN: F12345678"), "F12345678");
+
+  const run = mcaFilingAutomationService._private.createRun(generated.filing);
+  const captured = await mcaFilingAutomationService.captureSrn(run.id, "F12345678");
+  assert.equal(captured.run.status, "completed");
+  assert.equal(captured.run.srn, "F12345678");
+  const saved = mcaMsme1Service.getFiling(generated.filing.id);
+  assert.equal(saved.srn, "F12345678");
+  const persisted = db.prepare("SELECT * FROM mca_filing_automation_runs WHERE id = ?").get(run.id);
+  assert.equal(JSON.stringify(persisted).includes("secret"), false);
+  assert.equal(JSON.stringify(mcaFilingAutomationService.getStatus(run.id).events).includes("secret"), false);
+});
+
 test("rule engine applies MSME 15-day no-agreement and actual payment rules", () => {
   const result = evaluateVendor({
     party: "Rule Vendor",
@@ -2840,13 +3019,75 @@ test("RBI Bank Rate parser reads only Bank Rate history rows", () => {
     05 Dec, 2025 Till Date 5.50% 8% 13.50%
     06 Jun, 2025 04 Dec, 2025 5.75% 8% 13.75%
     Policy Repo Rate : 9.99%
+    Reverse Repo Rate : 7.77%
     Standing Deposit Facility Rate : 8.88%
+    Marginal Standing Facility Rate : 6.66%
   `;
   const rows = rbiBankRateService.parseBankRateRows(html, "https://www.dicgc.org.in/bank-rate", "2026-06-08T00:00:00.000Z");
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map((row) => row.bankRate), [5.5, 5.75]);
   assert.equal(rows[0].effectiveFromDate, "2025-12-05");
   assert.equal(rows[0].effectiveToDate, null);
+});
+
+test("RBI Bank Rate parser requires labelled Bank Rate history columns", () => {
+  const html = `
+    Policy Repo Rate 01 Jan, 2025 31 Jan, 2025 9.99% 8% 17.99%
+    Penal Interest Rate 01 Feb, 2025 28 Feb, 2025 10.25% 8% 18.25%
+  `;
+  assert.deepEqual(rbiBankRateService.parseBankRateRows(html), []);
+});
+
+test("RBI Bank Rate source allowlist rejects non-DICGC history URLs", () => {
+  assert.doesNotThrow(() => rbiBankRateService.assertAllowedSource("https://www.dicgc.org.in/bank-rate?page=2"));
+  assert.throws(
+    () => rbiBankRateService.assertAllowedSource("https://example.com/bank-rate"),
+    /Only DICGC Bank Rate history URLs/
+  );
+  assert.throws(
+    () => rbiBankRateService.assertAllowedSource("http://www.dicgc.org.in/bank-rate"),
+    /Only HTTPS/
+  );
+});
+
+test("RBI Bank Rate lookup includes closed-period boundaries without overlap", () => {
+  rbiBankRateService.createManualOverride({
+    effectiveFromDate: "2025-06-06",
+    effectiveToDate: "2025-12-04",
+    bankRate: 5.75,
+    reason: "Boundary test old slab",
+  }, "unit-test");
+  rbiBankRateService.createManualOverride({
+    effectiveFromDate: "2025-12-05",
+    bankRate: 5.5,
+    reason: "Boundary test current slab",
+  }, "unit-test");
+  assert.equal(rbiBankRateService.getRateForDate("2025-06-06").bankRate, 5.75);
+  assert.equal(rbiBankRateService.getRateForDate("2025-12-04").bankRate, 5.75);
+  assert.equal(rbiBankRateService.getRateForDate("2025-12-05").bankRate, 5.5);
+});
+
+test("RBI current-rate cross-check logs mismatch but does not source history", async () => {
+  const oldUrls = env.rbiCurrentRateUrls;
+  env.rbiCurrentRateUrls = ["https://www.rbi.org.in/current-rates"];
+  try {
+    const htmlByUrl = {
+      "https://www.dicgc.org.in/bank-rate": `
+        From To Bank Rate Penal Interest Rate Total
+        01 Jan, 2026 Till Date 5.50% 8% 13.50%
+      `,
+      "https://www.dicgc.org.in/bank-rate?page=2": "",
+      "https://www.rbi.org.in/current-rates": "Policy Repo Rate 9.99% SDF Rate 8.88% MSF Rate 7.77% Bank Rate: 6.00%",
+    };
+    const update = await rbiBankRateService.updateFromOfficialSource({
+      actor: "unit-test",
+      fetcher: async (url) => htmlByUrl[url] || "",
+    });
+    assert.equal(update.latest.bankRate, 5.5);
+    assert.ok(rbiBankRateService.listAuditLog().some((row) => row.action === "rbi_bank_rate_mismatch"));
+  } finally {
+    env.rbiCurrentRateUrls = oldUrls;
+  }
 });
 
 test("RBI Bank Rate official update stores history and manual override audit log", async () => {
@@ -2871,6 +3112,30 @@ test("RBI Bank Rate official update stores history and manual override audit log
   assert.ok(rbiBankRateService.listAuditLog().some((row) => row.action === "rbi_bank_rate_manual_override" && /unit test/i.test(row.reason)));
 });
 
+test("RBI Bank Rate manual override requires a non-empty reason", () => {
+  assert.throws(
+    () => rbiBankRateService.createManualOverride({
+      effectiveFromDate: "2024-03-01",
+      bankRate: 6,
+      reason: " ",
+    }, "unit-test"),
+    /reason is required/i
+  );
+});
+
+test("RBI Bank Rate update returns failure guidance when official fetch fails", async () => {
+  await assert.rejects(
+    () => rbiBankRateService.updateFromOfficialSource({
+      actor: "unit-test",
+      fetcher: async () => {
+        throw new Error("network unavailable");
+      },
+    }),
+    /RBI rate update failed.*use last verified rate or manual override/
+  );
+  assert.ok(rbiBankRateService.listAuditLog().some((row) => row.action === "rbi_bank_rate_update_failed"));
+});
+
 test("MSME interest uses date-wise Bank Rate periods when delay crosses rate changes", () => {
   rbiBankRateService.createManualOverride({
     effectiveFromDate: "2025-01-01",
@@ -2889,14 +3154,30 @@ test("MSME interest uses date-wise Bank Rate periods when delay crosses rate cha
     invoiceDate: "2025-01-01",
     asOnDate: "2025-02-20",
   });
-  assert.equal(result.delayDays, 35);
+  assert.equal(result.delayDays, 34);
   assert.equal(result.interestRateSource, "manual_override");
   assert.equal(result.ratePeriods.length, 2);
   assert.deepEqual(result.ratePeriods.map((period) => period.bankRatePercent), [6, 5]);
+  assert.deepEqual(result.ratePeriods.map((period) => period.toDate), ["2025-01-31", "2025-02-19"]);
   assert.ok(result.interest > 0);
 });
 
+test("MSME interest fails clearly when stored Bank Rate history has no matching calculation date", () => {
+  db.prepare("DELETE FROM rbi_bank_rates").run();
+  seedTestBankRate({ id: "unit-test-closed-rbi-rate", from: "2024-01-01", to: "2024-12-31", rate: 5.5 });
+  assert.throws(
+    () => calculateMSMEInterest({
+      principal: 10000,
+      invoiceDate: "2022-12-01",
+      asOnDate: "2023-02-01",
+    }),
+    /No RBI Bank Rate exists for the calculation date/
+  );
+});
+
 test("MSME interest calculator compounds interest with monthly rests after 45 days", () => {
+  db.prepare("DELETE FROM rbi_bank_rates").run();
+  seedTestBankRate({ id: "unit-test-default-rbi-rate-after-gap" });
   const result = calculateMSMEInterest({
     principal: 10000,
     invoiceDate: "2026-04-01",
@@ -2904,31 +3185,26 @@ test("MSME interest calculator compounds interest with monthly rests after 45 da
   });
   assert.equal(result.daysOutstanding, 75);
   assert.equal(result.allowedPaymentDays, 15);
-  assert.equal(result.delayDays, 60);
+  assert.equal(result.delayDays, 59);
   assert.equal(result.bankRatePercent, 5.5);
   assert.equal(result.annualInterestRate, 0.165);
   assert.equal(result.annualInterestRatePercent, 16.5);
-  assert.equal(result.interest, 276.89);
-  assert.equal(result.totalPayable, 10276.89);
+  assert.equal(result.interest, 272.21);
+  assert.equal(result.totalPayable, 10272.21);
   assert.equal(result.isDelayed, true);
 });
 
-test("MSME interest calculator honors configured RBI bank rate", () => {
-  const oldRate = env.msmeBankRatePercent;
-  env.msmeBankRatePercent = 6.5;
-  try {
-    const result = calculateMSMEInterest({
-      principal: 10000,
-      invoiceDate: "2026-04-01",
-      asOnDate: "2026-06-15",
-    });
-    assert.equal(result.bankRatePercent, 6.5);
-    assert.equal(result.annualInterestRate, 0.195);
-    assert.equal(result.annualInterestRatePercent, 19.5);
-    assert.equal(result.interest, 327.64);
-  } finally {
-    env.msmeBankRatePercent = oldRate;
-  }
+test("MSME interest calculator honors explicit manual annual rate without replacing stored history", () => {
+  const result = calculateMSMEInterest({
+    principal: 10000,
+    invoiceDate: "2026-04-01",
+    asOnDate: "2026-06-15",
+    annualInterestRate: 0.195,
+  });
+  assert.equal(result.annualInterestRate, 0.195);
+  assert.equal(result.annualInterestRatePercent, 19.5);
+  assert.equal(result.interestRateSource, "manual_input");
+  assert.equal(result.interest, 322.09);
 });
 
 test("MSME interest calculator caps agreed payment days at 45", () => {
@@ -2939,7 +3215,7 @@ test("MSME interest calculator caps agreed payment days at 45", () => {
     agreedPaymentDays: 90,
   });
   assert.equal(result.allowedPaymentDays, 45);
-  assert.equal(result.delayDays, 30);
+  assert.equal(result.delayDays, 29);
 });
 
 test("MSME interest calculator validates principal and dates", () => {

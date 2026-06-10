@@ -4,8 +4,12 @@ const db = require("../config/database");
 const env = require("../config/env");
 
 const DICGC_BANK_RATE_URL = "https://www.dicgc.org.in/bank-rate";
-const ALLOWED_HOSTS = new Set(["www.dicgc.org.in", "dicgc.org.in", "www.rbi.org.in", "rbi.org.in", "m.rbi.org.in"]);
-const UPDATE_FAILURE_MESSAGE = "RBI rate update failed — use last verified rate or manual override.";
+const DICGC_BANK_RATE_URLS = new Set([
+  "https://www.dicgc.org.in/bank-rate",
+  "https://dicgc.org.in/bank-rate",
+]);
+const UPDATE_FAILURE_MESSAGE = "RBI rate update failed - use last verified rate or manual override.";
+const MISSING_RATE_MESSAGE = "No RBI Bank Rate exists for the calculation date. Ask admin to fetch/update Bank Rate history or add a manual override.";
 
 function nowIso() {
   return new Date().toISOString();
@@ -80,12 +84,15 @@ function stripTags(value) {
 function assertAllowedSource(sourceUrl) {
   const parsed = new URL(sourceUrl);
   if (parsed.protocol !== "https:") throw new Error("Only HTTPS official RBI/DICGC sources are allowed");
-  if (!ALLOWED_HOSTS.has(parsed.hostname.toLowerCase())) {
-    throw new Error("Only official RBI/DICGC Bank Rate sources are allowed");
-  }
-  if (!/bank-rate/i.test(parsed.pathname) && !/rbi\.org\.in$/i.test(parsed.hostname)) {
-    throw new Error("Source must be a Bank Rate page or an explicitly allowed RBI current-rate page");
-  }
+  const canonical = `${parsed.origin}${parsed.pathname}`.replace(/\/$/, "");
+  const configuredRbiUrls = new Set((env.rbiCurrentRateUrls || []).map((url) => {
+    const allowed = new URL(url);
+    return `${allowed.origin}${allowed.pathname}${allowed.search}`.replace(/\/$/, "");
+  }));
+  const sourceWithoutHash = `${parsed.origin}${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
+  if (DICGC_BANK_RATE_URLS.has(canonical)) return;
+  if (configuredRbiUrls.has(sourceWithoutHash)) return;
+  throw new Error("Only DICGC Bank Rate history URLs or explicitly configured RBI current-rate URLs are allowed");
 }
 
 function fetchText(sourceUrl) {
@@ -119,6 +126,7 @@ function fetchText(sourceUrl) {
 
 function parseBankRateRows(html, sourceUrl = DICGC_BANK_RATE_URL, fetchedAt = nowIso()) {
   const text = stripTags(html);
+  if (!/\bFrom\b\s+\bTo\b\s+\bBank Rate\b/i.test(text)) return [];
   const matches = [];
   const rowPattern = /(\d{1,2}\s+[A-Za-z]+,?\s+\d{4})\s+(Till Date|\d{1,2}\s+[A-Za-z]+,?\s+\d{4})\s+(\d+(?:\.\d+)?)%\s+\d+(?:\.\d+)?%\s+\d+(?:\.\d+)?%/gi;
   let match;
@@ -142,6 +150,12 @@ function parseBankRateRows(html, sourceUrl = DICGC_BANK_RATE_URL, fetchedAt = no
     });
   }
   return matches;
+}
+
+function parseCurrentBankRate(html) {
+  const text = stripTags(html);
+  const match = text.match(/\bBank Rate\b(?!\s*\/\s*Penal)(?:\s*(?:is|:|-|at))?\s*(\d+(?:\.\d+)?)\s*%/i);
+  return match ? normalizeRate(match[1]) : null;
 }
 
 function mapRate(row) {
@@ -219,18 +233,58 @@ function saveRates(rates = [], actor = "unknown") {
       );
       if (result.changes) inserted.push({ ...rate, id, createdBy: actor });
     }
-    if (inserted.length) {
-      insertAudit({
-        action: "rbi_bank_rate_official_update",
-        newValue: { inserted },
-        actor,
-        reason: "Fetched official DICGC Bank Rate history",
-        sourceUrl: rates[0]?.sourceUrl || DICGC_BANK_RATE_URL,
-      });
-    }
+    insertAudit({
+      action: "rbi_bank_rate_official_update",
+      newValue: { parsed: rates.length, insertedCount: inserted.length, inserted },
+      actor,
+      reason: "Fetched official DICGC Bank Rate history",
+      sourceUrl: rates[0]?.sourceUrl || DICGC_BANK_RATE_URL,
+    });
   });
   tx();
   return inserted;
+}
+
+async function auditRbiCurrentRateCrossCheck({ latest, actor, fetcher }) {
+  for (const sourceUrl of env.rbiCurrentRateUrls || []) {
+    let currentBankRate = null;
+    try {
+      assertAllowedSource(sourceUrl);
+      const html = await fetcher(sourceUrl);
+      currentBankRate = parseCurrentBankRate(html);
+    } catch (error) {
+      insertAudit({
+        action: "rbi_bank_rate_cross_check_failed",
+        oldValue: { latest },
+        newValue: { error: error.message },
+        actor,
+        reason: "Configured RBI current-rate cross-check failed; DICGC history remains the source of record",
+        sourceUrl,
+      });
+      continue;
+    }
+    if (currentBankRate == null) {
+      insertAudit({
+        action: "rbi_bank_rate_cross_check_unreadable",
+        oldValue: { latest },
+        newValue: { sourceUrl },
+        actor,
+        reason: "Configured RBI current-rate page did not expose a readable Bank Rate value",
+        sourceUrl,
+      });
+      continue;
+    }
+    if (latest && Number(latest.bankRate) !== Number(currentBankRate)) {
+      insertAudit({
+        action: "rbi_bank_rate_mismatch",
+        oldValue: { dicgcLatest: latest },
+        newValue: { rbiCurrentBankRate: currentBankRate, sourceUrl },
+        actor,
+        reason: "Configured RBI current-rate cross-check differs from latest DICGC Bank Rate history",
+        sourceUrl,
+      });
+    }
+  }
 }
 
 async function updateFromOfficialSource({ actor = "unknown", sourceUrl = DICGC_BANK_RATE_URL, fetcher = fetchText } = {}) {
@@ -248,13 +302,15 @@ async function updateFromOfficialSource({ actor = "unknown", sourceUrl = DICGC_B
     }
     if (!rates.length) throw new Error("No Bank Rate history rows found in official source");
     const inserted = saveRates(rates, actor);
+    const latest = getLatestRate();
+    await auditRbiCurrentRateCrossCheck({ latest, actor, fetcher });
     return {
       success: true,
       sourceUrl,
       fetchedAt,
       parsed: rates.length,
       inserted: inserted.length,
-      latest: getLatestRate(),
+      latest,
       rates: listRates(),
     };
   } catch (error) {
@@ -333,6 +389,15 @@ function getRateForDateOrFallback(dateValue) {
   return getRateForDate(dateValue) || fallbackRate(dateValue);
 }
 
+function requireRateForDate(dateValue) {
+  const rate = getRateForDate(dateValue);
+  if (rate) return rate;
+  const error = new Error(MISSING_RATE_MESSAGE);
+  error.status = 400;
+  error.code = "RBI_BANK_RATE_MISSING_FOR_DATE";
+  throw error;
+}
+
 function createManualOverride(input = {}, actor = "unknown") {
   const effectiveFromDate = normalizeDate(input.effectiveFromDate || input.effective_from_date);
   const effectiveToDate = normalizeDate(input.effectiveToDate || input.effective_to_date);
@@ -379,7 +444,10 @@ function createManualOverride(input = {}, actor = "unknown") {
 module.exports = {
   DICGC_BANK_RATE_URL,
   UPDATE_FAILURE_MESSAGE,
+  MISSING_RATE_MESSAGE,
+  assertAllowedSource,
   normalizeDate,
+  parseCurrentBankRate,
   parseBankRateRows,
   updateFromOfficialSource,
   listRates,
@@ -387,5 +455,7 @@ module.exports = {
   getLatestRate,
   getRateForDate,
   getRateForDateOrFallback,
+  requireRateForDate,
   createManualOverride,
 };
+

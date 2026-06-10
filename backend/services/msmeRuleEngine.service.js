@@ -113,6 +113,10 @@ function daysBetween(fromDate, toDate) {
   return Math.max(Math.floor((to - from) / 86400000), 0);
 }
 
+function previousDay(dateValue) {
+  return addDays(dateValue, -1);
+}
+
 function dateWiseInterest(principal, fromDate, toDate, options = {}) {
   const start = parseDate(fromDate);
   const end = parseDate(toDate);
@@ -158,7 +162,7 @@ function dateWiseInterest(principal, fromDate, toDate, options = {}) {
   let totalInterest = 0;
   const ratePeriods = [];
   while (cursor < endIso) {
-    const rate = rbiBankRateService.getRateForDateOrFallback(cursor);
+    const rate = rbiBankRateService.requireRateForDate(cursor);
     const rateExclusiveEnd = rate.effectiveToDate ? addDays(rate.effectiveToDate, 1) : endIso;
     const segmentEnd = minIsoDate(rateExclusiveEnd, endIso);
     const delayDays = daysBetween(cursor, segmentEnd);
@@ -169,7 +173,8 @@ function dateWiseInterest(principal, fromDate, toDate, options = {}) {
     balance = roundMoney(balance + interestAmount);
     ratePeriods.push({
       fromDate: cursor,
-      toDate: segmentEnd,
+      toDate: previousDay(segmentEnd),
+      calculationEndDate: segmentEnd,
       delayDays,
       bankRatePercent: rate.bankRate,
       annualInterestRatePercent: roundMoney(annualInterestRate * 100),
@@ -194,6 +199,14 @@ function dateWiseInterest(principal, fromDate, toDate, options = {}) {
     interestRateSource: sources.length > 1 ? "mixed_period_rates" : (sources[0] || "config_fallback"),
     ratePeriods,
   };
+}
+
+function getBankRateForDate(date) {
+  return rbiBankRateService.requireRateForDate(date);
+}
+
+function calculatePeriodWiseInvoiceInterest({ principal, interestStartDate, endDate, ...options } = {}) {
+  return dateWiseInterest(principal, interestStartDate, endDate, options);
 }
 
 function booleanish(value) {
@@ -278,10 +291,10 @@ function calculateInvoiceInterest(invoice = {}, vendor = {}, options = {}) {
   const due = dueDateForInvoice(invoice, vendor);
   const principal = Number(invoice.interestPrincipal ?? invoice.unpaidAmount ?? invoice.pendingAmount ?? invoice.amount ?? invoice.originalAmount ?? 0);
   const relevantDate = invoice.paymentDate || options.asOnDate || invoice.asOnDate;
-  const delayDays = due.appointedDay && relevantDate ? daysBetween(due.appointedDay, relevantDate) : 0;
+  const delayDays = due.interestStartDate && relevantDate ? daysBetween(due.interestStartDate, relevantDate) : 0;
   const rateResult = delayDays > 0
-    ? dateWiseInterest(principal, due.appointedDay, relevantDate, options)
-    : dateWiseInterest(0, due.appointedDay || relevantDate, relevantDate, options);
+    ? calculatePeriodWiseInvoiceInterest({ principal, interestStartDate: due.interestStartDate, endDate: relevantDate, ...options })
+    : calculatePeriodWiseInvoiceInterest({ principal: 0, interestStartDate: due.interestStartDate || relevantDate, endDate: relevantDate, ...options });
   return {
     ...due,
     principal: roundMoney(principal),
@@ -393,6 +406,8 @@ module.exports = {
   dueDateForInvoice,
   calculateInvoiceInterest,
   dateWiseInterest,
+  getBankRateForDate,
+  calculatePeriodWiseInvoiceInterest,
   getConfiguredBankRatePercent,
   getDefaultAnnualInterestRate,
   taxBasisForFiscalYear,

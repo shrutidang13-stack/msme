@@ -4,7 +4,7 @@ import { saveVendorStatus, verifyUdyam } from "../services/api";
 const emptyDraft = {
   isMSME: "",
   udyamNumber: "",
-  enterpriseType: "Micro",
+  enterpriseType: "",
   verificationStatus: "pending",
 };
 
@@ -126,9 +126,9 @@ export function useVendorVerification() {
       const draft = drafts[vendor.name] || emptyDraft;
       const effectiveDraft = {
         ...draft,
-        isMSME: draft.isMSME || (vendor.vendorMaster?.isMSME ? "yes" : ""),
+        isMSME: draft.isMSME || (draft.udyamNumber || vendor.vendorMaster?.udyamNumber ? "yes" : vendor.vendorMaster?.isMSME ? "yes" : ""),
         udyamNumber: draft.udyamNumber || vendor.vendorMaster?.udyamNumber || "",
-        enterpriseType: draft.enterpriseType || vendor.vendorMaster?.enterpriseType || "Micro",
+        enterpriseType: draft.enterpriseType || vendor.vendorMaster?.enterpriseType || (draft.udyamNumber || vendor.vendorMaster?.udyamNumber ? "Micro" : ""),
       };
       if (!effectiveDraft.udyamNumber?.trim() || effectiveDraft.isMSME === "no") continue;
       const updated = await verifyVendor(vendor, effectiveDraft);
