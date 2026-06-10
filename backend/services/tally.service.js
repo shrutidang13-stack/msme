@@ -597,7 +597,7 @@ function companyContextVariants(companyName) {
 }
 
 function cannotSetCompanyContext(message) {
-  return /Could not set\s+'?SVCurrentCompany'?/i.test(message || "");
+  return /Could not set\s+(?:'|&apos;)?SVCurrentCompany(?:'|&apos;)?/i.test(message || "");
 }
 
 async function tallyRequestWithCompanyVariants(buildXml, companyName, options = {}) {
@@ -614,6 +614,19 @@ async function tallyRequestWithCompanyVariants(buildXml, companyName, options = 
     lastXml = xml;
     const tallyLineError = lineError(xml);
     if (!cannotSetCompanyContext(tallyLineError)) return { xml, requestXml, companyName: variant, lineError: tallyLineError };
+    lastLineError = tallyLineError;
+  }
+  if (lastLineError) {
+    logImportStage("companyContextAttempt", {
+      attemptedSVCURRENTCOMPANY: "",
+      normalizedAttempt: "",
+      fallback: "active_loaded_company",
+    });
+    const requestXml = buildXml("");
+    const xml = await tallyRequest(requestXml, options);
+    const tallyLineError = lineError(xml);
+    if (!cannotSetCompanyContext(tallyLineError)) return { xml, requestXml, companyName: cleanName(companyName), lineError: tallyLineError };
+    lastXml = xml;
     lastLineError = tallyLineError;
   }
   return { xml: lastXml, requestXml: "", companyName: variants[variants.length - 1] || cleanName(companyName), lineError: lastLineError };

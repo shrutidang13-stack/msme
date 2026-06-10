@@ -253,6 +253,33 @@ function migrate() {
       FOREIGN KEY(filing_id) REFERENCES mca_msme1_filings(id)
     );
 
+    CREATE TABLE IF NOT EXISTS mca_filing_automation_runs (
+      id TEXT PRIMARY KEY,
+      filing_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      current_step TEXT NOT NULL DEFAULT '',
+      message TEXT NOT NULL DEFAULT '',
+      selected_file_path TEXT NOT NULL DEFAULT '',
+      file_type_used TEXT NOT NULL DEFAULT '',
+      srn TEXT NOT NULL DEFAULT '',
+      error_message TEXT NOT NULL DEFAULT '',
+      screenshot_path TEXT NOT NULL DEFAULT '',
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      completed_at TEXT,
+      FOREIGN KEY(filing_id) REFERENCES mca_msme1_filings(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS mca_filing_automation_events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      step_name TEXT NOT NULL DEFAULT '',
+      message TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES mca_filing_automation_runs(id)
+    );
+
     CREATE TABLE IF NOT EXISTS purchase_invoices (
       id TEXT PRIMARY KEY,
       vendor_id TEXT,
@@ -516,6 +543,10 @@ function migrate() {
       ON mca_msme1_supplier_rows(filing_id);
     CREATE INDEX IF NOT EXISTS idx_mca_msme1_xml_generations_filing
       ON mca_msme1_xml_generations(filing_id);
+    CREATE INDEX IF NOT EXISTS idx_mca_filing_automation_runs_filing
+      ON mca_filing_automation_runs(filing_id, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_mca_filing_automation_events_run
+      ON mca_filing_automation_events(run_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_tax_audit_reports_msme
       ON tax_audit_reports(source_msme_report_id);
     CREATE INDEX IF NOT EXISTS idx_tax_audit_reports_import

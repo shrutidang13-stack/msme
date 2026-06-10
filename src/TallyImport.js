@@ -234,7 +234,7 @@ function downloadUdyamTemplate() {
   XLSX.writeFile(workbook, "Udyam_Import_Template.xlsx");
 }
 
-export default function TallyImport() {
+export default function TallyImport({ onClearDisplay }) {
   const activeImportRequestRef = useRef(0);
   const [vendors, setVendors] = useState([]);
   const [selectedFY, setSelectedFY] = useState(getCurrentFinancialYear());
@@ -482,6 +482,7 @@ export default function TallyImport() {
     setRefreshing(true);
     try {
       resetImportDisplay();
+      onClearDisplay?.();
     } catch (err) {
       setError(`Could not clear display: ${err.message}`);
     } finally {
@@ -999,7 +1000,7 @@ export default function TallyImport() {
 
       {step === 1 && (
         <div className="bg-white rounded-2xl p-8 shadow max-w-2xl">
-          <h3 className="text-xl font-bold text-gray-800 mb-2">Import Creditors From TallyPrime</h3>
+          <h3 className="text-xl font-bold text-gray-800 mb-2">Import Data From TallyPrime</h3>
           <p className="text-sm text-gray-600 mb-4">
             Press the import button after TallyPrime is open, XML server is enabled, and the target company is loaded. MSME Guard will fetch all Sundry Creditors and ledger voucher rows for the selected financial year.
           </p>

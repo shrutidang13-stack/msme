@@ -350,8 +350,34 @@ export function reportEvidenceBundleUrl(id) {
   return `${API_BASE_URL}/api/reports/${id}/evidence-bundle`;
 }
 
+export function auditEvidencePackUrl(id) {
+  return `${API_BASE_URL}/api/compliance/audit-pack/${id}/download`;
+}
+
 export function reportTallyReconciliationUrl(id) {
   return `${API_BASE_URL}/api/reports/${id}/tally-reconciliation`;
+}
+
+export async function fetchComplianceRiskScore(reportId) {
+  return request(`/api/compliance/risk-score/${reportId}`);
+}
+
+export async function fetchPaymentRecommendations(reportId) {
+  return request(`/api/compliance/payment-recommendations/${reportId}`);
+}
+
+export async function runPaymentSimulation(payload) {
+  return request("/api/compliance/payment-simulation", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function explainCompliance(payload) {
+  return request("/api/compliance/explain", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function previewMcaMsme1(payload) {
@@ -413,6 +439,38 @@ export function mcaMsme1DownloadUrl(id) {
 
 export function mcaMsme1XmlDownloadUrl(id) {
   return `${API_BASE_URL}/api/mca/msme1/xml/${id}/download`;
+}
+
+export async function startMcaMsme1AssistedFiling(filingId, payload) {
+  return request(`/api/mca-msme1/${filingId}/file-msme1`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchMcaMsme1AutomationStatus(runId) {
+  return request(`/api/mca-msme1/automation/${runId}/status`);
+}
+
+export async function continueMcaMsme1Automation(runId) {
+  return request(`/api/mca-msme1/automation/${runId}/continue`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function abortMcaMsme1Automation(runId) {
+  return request(`/api/mca-msme1/automation/${runId}/abort`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export async function captureMcaMsme1AutomationSrn(runId, srn = "") {
+  return request(`/api/mca-msme1/automation/${runId}/capture-srn`, {
+    method: "POST",
+    body: JSON.stringify({ srn }),
+  });
 }
 
 export function auditTrailDownloadUrl(format = "csv") {

@@ -5,8 +5,10 @@ import {
   fetchTaxAuditReport,
   fetchTaxAuditReports,
 } from "./services/api";
+import AuditEvidencePackButton from "./components/AuditEvidencePackButton";
+import ComplianceExplanationPanel from "./components/ComplianceExplanationPanel";
 
-export default function TaxAuditReportGenerator() {
+export default function TaxAuditReportGenerator({ displayResetVersion = 0 }) {
   const [msmeReports, setMsmeReports] = useState([]);
   const [activeReport, setActiveReport] = useState(null);
   const [selectedMsmeReportId, setSelectedMsmeReportId] = useState("");
@@ -16,6 +18,7 @@ export default function TaxAuditReportGenerator() {
   const [loading, setLoading] = useState("");
 
   const load = useCallback(async () => {
+    if (displayResetVersion > 0) return;
     const [msme, tax] = await Promise.all([fetchReports(), fetchTaxAuditReports()]);
     setMsmeReports(msme.reports || []);
     if (!selectedMsmeReportId && msme.reports?.[0]) setSelectedMsmeReportId(msme.reports[0].id);
@@ -23,11 +26,22 @@ export default function TaxAuditReportGenerator() {
       const response = await fetchTaxAuditReport(tax.reports[0].id);
       setActiveReport(response.report);
     }
-  }, [activeReport, selectedMsmeReportId]);
+  }, [activeReport, displayResetVersion, selectedMsmeReportId]);
 
   useEffect(() => {
     load().catch((error) => setMessage(error.message));
   }, [load]);
+
+  useEffect(() => {
+    if (displayResetVersion === 0) return;
+    setMsmeReports([]);
+    setActiveReport(null);
+    setSelectedMsmeReportId("");
+    setFormType("3CB");
+    setAssessmentYear("");
+    setMessage("Display cleared. Create a fresh tax audit draft when ready.");
+    setLoading("");
+  }, [displayResetVersion]);
 
   const createReport = async () => {
     if (!selectedMsmeReportId) return;
@@ -78,35 +92,43 @@ export default function TaxAuditReportGenerator() {
             {loading === "create" ? "Creating..." : "Create Tax Audit Draft"}
           </button>
         </div>
+        {selectedMsmeReportId && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            <AuditEvidencePackButton reportId={selectedMsmeReportId} className="bg-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50" />
+          </div>
+        )}
       </section>
 
       {activeReport && (
-        <section className="grid lg:grid-cols-2 gap-5">
-          <AnnexurePreview
-            title="Clause 22 MSME Computation"
-            rows={activeReport.annexures?.find((item) => item.annexureType === "clause22")?.payload || []}
-            amountKey="clause22iiiBOutstandingDisallowance"
-            columns={[
-              ["supplier", "Supplier"],
-              ["totalPurchasesFromMicroSmall", "Purchases"],
-              ["amountPaidDuringYear", "Paid"],
-              ["clause22iiiBOutstandingDisallowance", "Clause 22(iii)(b)"],
-              ["remarks", "Remarks"],
-            ]}
-          />
-          <AnnexurePreview
-            title="Clause 26 43B(h) Disallowance"
-            rows={activeReport.annexures?.find((item) => item.annexureType === "clause26")?.payload || []}
-            amountKey="principalDisallowance"
-            columns={[
-              ["supplier", "Supplier"],
-              ["principalDisallowance", "Disallowance"],
-              ["sourceClause", "Source"],
-              ["allowedInYear", "Allowed in year"],
-              ["remarks", "Remarks"],
-            ]}
-          />
-        </section>
+        <>
+          <section className="grid lg:grid-cols-2 gap-5">
+            <AnnexurePreview
+              title="Clause 22 MSME Computation"
+              rows={activeReport.annexures?.find((item) => item.annexureType === "clause22")?.payload || []}
+              amountKey="clause22iiiBOutstandingDisallowance"
+              columns={[
+                ["supplier", "Supplier"],
+                ["totalPurchasesFromMicroSmall", "Purchases"],
+                ["amountPaidDuringYear", "Paid"],
+                ["clause22iiiBOutstandingDisallowance", "Clause 22(iii)(b)"],
+                ["remarks", "Remarks"],
+              ]}
+            />
+            <AnnexurePreview
+              title="Clause 26 43B(h) Disallowance"
+              rows={activeReport.annexures?.find((item) => item.annexureType === "clause26")?.payload || []}
+              amountKey="principalDisallowance"
+              columns={[
+                ["supplier", "Supplier"],
+                ["principalDisallowance", "Disallowance"],
+                ["sourceClause", "Source"],
+                ["allowedInYear", "Allowed in year"],
+                ["remarks", "Remarks"],
+              ]}
+            />
+          </section>
+          <ComplianceExplanationPanel reportId={activeReport.sourceMsmeReportId || selectedMsmeReportId} />
+        </>
       )}
     </div>
   );

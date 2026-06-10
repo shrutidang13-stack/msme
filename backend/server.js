@@ -11,8 +11,10 @@ const purchaseInvoiceRoutes = require("./routes/purchaseInvoiceRoutes");
 const legalRoutes = require("./routes/legalRoutes");
 const msmeRoutes = require("./routes/msmeRoutes");
 const mcaMsme1Routes = require("./routes/mcaMsme1Routes");
+const mcaMsme1FilingAutomationRoutes = require("./routes/mcaMsme1FilingAutomationRoutes");
 const taxAuditRoutes = require("./routes/taxAuditRoutes");
 const rbiBankRateRoutes = require("./routes/rbiBankRateRoutes");
+const complianceRoutes = require("./routes/complianceRoutes");
 const { requireAuth } = require("./middleware/auth");
 
 const app = express();
@@ -34,8 +36,10 @@ app.use("/api", auditRoutes);
 app.use("/api", legalRoutes);
 app.use("/api", msmeRoutes);
 app.use("/api", mcaMsme1Routes);
+app.use("/api", mcaMsme1FilingAutomationRoutes);
 app.use("/api", taxAuditRoutes);
 app.use("/api", rbiBankRateRoutes);
+app.use("/api", complianceRoutes);
 app.use("/api/ai", aiRoutes);
 
 app.get("/", (req, res) => {
@@ -56,6 +60,8 @@ app.get("/", (req, res) => {
       "POST /api/mca/msme1/generate",
       "POST /api/reports/msme",
       "POST /api/tax-audit/reports",
+      "GET  /api/compliance/risk-score/:reportId",
+      "POST /api/compliance/payment-simulation",
       "POST /api/run-full-audit",
     ].join("\n")
   );

@@ -62,6 +62,20 @@ function cleanUdyamRemark(remark = "") {
   return withoutSourceFile || "";
 }
 
+function effectiveUdyamNumber(vendor, draft) {
+  return draft.udyamNumber || vendor.vendorMaster?.udyamNumber || "";
+}
+
+function effectiveIsMSME(vendor, draft, udyamNumber) {
+  if (String(udyamNumber || "").trim()) return "yes";
+  return draft.isMSME || (vendor.vendorMaster?.isMSME ? "yes" : vendor.vendorMaster?.verificationStatus === "not_msme" ? "no" : "");
+}
+
+function effectiveEnterpriseType(vendor, draft, udyamNumber) {
+  if (!String(udyamNumber || "").trim()) return "";
+  return draft.enterpriseType || vendor.vendorMaster?.enterpriseType || "Micro";
+}
+
 export default function VendorVerificationTable({
   vendors,
   drafts,
@@ -144,7 +158,9 @@ export default function VendorVerificationTable({
               const draft = drafts[vendor.name] || {};
               const status = vendor.vendorMaster?.udyamStatus || vendor.vendorMaster?.verificationStatus || "pending";
               const displayRemark = cleanUdyamRemark(vendor.vendorMaster?.udyamRemarks);
-              const isMSME = draft.isMSME || (vendor.vendorMaster?.isMSME ? "yes" : vendor.vendorMaster?.verificationStatus === "not_msme" ? "no" : "");
+              const udyamNumber = effectiveUdyamNumber(vendor, draft);
+              const isMSME = effectiveIsMSME(vendor, draft, udyamNumber);
+              const enterpriseType = effectiveEnterpriseType(vendor, draft, udyamNumber);
               return (
                 <tr key={vendor.name} className="border-t align-top">
                   <td className="p-2 font-semibold text-xs min-w-52">
@@ -173,17 +189,25 @@ export default function VendorVerificationTable({
                     <input
                       className="border rounded p-2 text-xs w-44"
                       placeholder="UDYAM-XX-00-0000000"
-                      value={draft.udyamNumber ?? vendor.vendorMaster?.udyamNumber ?? ""}
+                      value={udyamNumber}
                       disabled={isMSME === "no"}
-                      onChange={(event) => updateDraft(vendor.name, { udyamNumber: event.target.value.toUpperCase() })}
+                      onChange={(event) => {
+                        const nextUdyamNumber = event.target.value.toUpperCase();
+                        updateDraft(vendor.name, {
+                          udyamNumber: nextUdyamNumber,
+                          isMSME: nextUdyamNumber.trim() ? "yes" : "",
+                          enterpriseType: nextUdyamNumber.trim() ? (draft.enterpriseType || vendor.vendorMaster?.enterpriseType || "Micro") : "",
+                        });
+                      }}
                     />
                   </td>
                   <td className="p-2">
                     <select
                       className="border rounded p-2 text-xs"
-                      value={draft.enterpriseType ?? vendor.vendorMaster?.enterpriseType ?? "Micro"}
-                      disabled={isMSME === "no"}
+                      value={enterpriseType}
+                      disabled={isMSME === "no" || !String(udyamNumber || "").trim()}
                       onChange={(event) => updateDraft(vendor.name, { enterpriseType: event.target.value })}>
+                      <option value="">NA</option>
                       <option value="Micro">Micro</option>
                       <option value="Small">Small</option>
                       <option value="Medium">Medium</option>

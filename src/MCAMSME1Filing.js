@@ -1,26 +1,39 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  abortMcaMsme1Automation,
+  captureMcaMsme1AutomationSrn,
+  continueMcaMsme1Automation,
+  createMSMEReport,
   downloadUrl,
+  fetchMcaMsme1AutomationStatus,
+  fetchMcaMsme1Filings,
+  fetchImports,
   fetchReports,
   generateMcaMsme1,
-  generateMcaMsme1Xml,
   mcaMsme1DownloadUrl,
-  mcaMsme1XmlDownloadUrl,
   previewMcaMsme1,
-  uploadMcaMsme1Excel,
+  startMcaMsme1AssistedFiling,
 } from "./services/api";
+import ComplianceExplanationPanel from "./components/ComplianceExplanationPanel";
+import ComplianceRiskScore from "./components/ComplianceRiskScore";
 
 const HALF_YEARS = [
   ["apr-sep", "April-September"],
   ["oct-mar", "October-March"],
 ];
 
-const TARGET_FISCAL_YEAR = "2026-27";
+const TARGET_FISCAL_YEAR = "2025-26";
+const DEFAULT_HALF_YEAR = "oct-mar";
+const DISPLAY_FISCAL_YEARS = ["2025-26", "2026-27"];
+const MCA_PORTAL_URL = "https://www.mca.gov.in/content/mca/global/en/home.html";
 const COMPANY_DEFAULTS = {
   cin: "U34100UP2021PTC156494",
   pan: "AAHCN9637N",
   companyName: "NXTMOBILITY ENERGY PRIVATE LIMITED",
 };
+
+const AUTOMATION_TERMINAL_STATUSES = new Set(["completed", "aborted", "validation_failed", "error"]);
+const MANUAL_AUTOMATION_STATUSES = new Set(["waiting_for_captcha", "waiting_for_otp", "manual_action_required", "waiting_for_dsc", "waiting_for_final_submission", "srn_capture_pending"]);
 
 function isValidFiscalYear(value) {
   return /^\d{4}-\d{2}$/.test(String(value || ""));
@@ -54,40 +67,142 @@ function shortDate(value) {
   return value ? new Date(value).toLocaleString("en-IN") : "";
 }
 
-export default function MCAMSME1Filing() {
+function importHasFiscalYear(importRun, fiscalYear) {
+  const years = importRun?.summary?.financialYears || [];
+  return years.includes(fiscalYear) || importRun?.fiscalYear === fiscalYear || importRun?.fiscalYear === "custom";
+}
+
+function findImportForFiscalYear(imports = [], fiscalYear) {
+  return imports.find((importRun) => importRun.status === "completed" && importHasFiscalYear(importRun, fiscalYear));
+}
+
+function findLatestGeneratedFiling(filings = [], reportId, halfYear) {
+  if (!reportId) return null;
+  return filings.find((filing) =>
+    filing.reportId === reportId &&
+    filing.halfYear === halfYear &&
+    filing.downloadUrl &&
+    filing.status !== "validation_failed"
+  ) || null;
+}
+
+export default function MCAMSME1Filing({ displayResetVersion = 0 }) {
   const [reports, setReports] = useState([]);
   const [reportId, setReportId] = useState("");
-  const [halfYear, setHalfYear] = useState("apr-sep");
+  const [halfYear, setHalfYear] = useState(DEFAULT_HALF_YEAR);
   const [preview, setPreview] = useState(null);
   const [selectedFiling, setSelectedFiling] = useState(null);
   const [companyDetails, setCompanyDetails] = useState(COMPANY_DEFAULTS);
   const [uploadedRows, setUploadedRows] = useState([]);
-  const [xmlGeneration, setXmlGeneration] = useState(null);
+  const [automationForm, setAutomationForm] = useState({
+    mcaUserId: "",
+  });
+  const [automationRun, setAutomationRun] = useState(null);
+  const [automationEvents, setAutomationEvents] = useState([]);
   const [loading, setLoading] = useState("");
+  const [autoGeneratingReports, setAutoGeneratingReports] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
   const selectedReport = useMemo(() => reports.find((report) => report.id === reportId), [reports, reportId]);
+  const reportsByFiscalYear = useMemo(() => {
+    const byYear = {};
+    for (const fiscalYear of DISPLAY_FISCAL_YEARS) {
+      byYear[fiscalYear] = reports.find((report) => report.fiscalYear === fiscalYear) || null;
+    }
+    return byYear;
+  }, [reports]);
   const dueDate = halfYearDueDate(selectedReport?.fiscalYear, halfYear);
   const blockingErrors = preview?.validation?.errors || [];
   const warnings = preview?.validation?.warnings || [];
-  const canGenerate = preview && blockingErrors.length === 0 && !loading;
+  const canGenerate = reportId && !loading && !autoGeneratingReports;
+  const automationStatus = automationRun?.status || "";
+  const canContinueAutomation = automationRun?.id && MANUAL_AUTOMATION_STATUSES.has(automationStatus) && automationStatus !== "srn_capture_pending";
+  const canAbortAutomation = automationRun?.id && !AUTOMATION_TERMINAL_STATUSES.has(automationStatus);
+  const canCaptureSrn = automationRun?.id && ["waiting_for_final_submission", "srn_capture_pending", "completed"].includes(automationStatus);
 
-  const loadBase = async () => {
-    const reportData = await fetchReports();
-    setReports(reportData.reports || []);
-    setReportId((current) => (isValidFiscalYear((reportData.reports || []).find((report) => report.id === current)?.fiscalYear) ? current : preferredReportId(reportData.reports || [])));
-  };
+  const ensureDisplayReports = useCallback(async (currentReports = []) => {
+    const existingYears = new Set(currentReports.map((report) => report.fiscalYear));
+    const missingYears = DISPLAY_FISCAL_YEARS.filter((fiscalYear) => !existingYears.has(fiscalYear));
+    if (!missingYears.length) return currentReports;
+    const importData = await fetchImports();
+    const createdYears = [];
+    const skippedYears = [];
+    for (const fiscalYear of missingYears) {
+      const importRun = findImportForFiscalYear(importData.imports || [], fiscalYear);
+      if (!importRun?.id) {
+        skippedYears.push(fiscalYear);
+        continue;
+      }
+      await createMSMEReport(importRun.id, fiscalYear, importRun.asOn || "");
+      createdYears.push(fiscalYear);
+    }
+    if (createdYears.length) {
+      setMessage(`Generated MSME report for FY ${createdYears.join(" and FY ")}.`);
+      return (await fetchReports()).reports || [];
+    }
+    if (skippedYears.length) {
+      setMessage(`No completed Tally import found for FY ${skippedYears.join(" and FY ")}. Import Tally data first.`);
+    }
+    return currentReports;
+  }, []);
+
+  const loadBase = useCallback(async ({ ensureReports = true } = {}) => {
+    const [reportData, filingData] = await Promise.all([fetchReports(), fetchMcaMsme1Filings()]);
+    const nextReports = ensureReports ? await ensureDisplayReports(reportData.reports || []) : (reportData.reports || []);
+    setReports(nextReports);
+    const nextReportId = preferredReportId(nextReports);
+    const activeReportId = isValidFiscalYear(nextReports.find((report) => report.id === reportId)?.fiscalYear) ? reportId : nextReportId;
+    setReportId(activeReportId);
+    const latestFiling = findLatestGeneratedFiling(filingData.filings || [], activeReportId, halfYear);
+    setSelectedFiling(latestFiling || null);
+    if (!nextReportId && !nextReports.length) {
+      setMessage("Generate an MSME compliance report first, then MCA MSME-1 actions will be available.");
+    }
+  }, [ensureDisplayReports, halfYear, reportId]);
 
   useEffect(() => {
-    loadBase().catch((err) => setError(err.message));
-  }, []);
+    if (displayResetVersion > 0) return;
+    setAutoGeneratingReports(true);
+    loadBase()
+      .catch((err) => setError(err.message))
+      .finally(() => setAutoGeneratingReports(false));
+  }, [displayResetVersion, loadBase]);
+
+  useEffect(() => {
+    if (displayResetVersion === 0) return;
+    setReports([]);
+    setReportId("");
+    setPreview(null);
+    setSelectedFiling(null);
+    setUploadedRows([]);
+    setAutomationRun(null);
+    setAutomationEvents([]);
+    setAutoGeneratingReports(false);
+    setLoading("");
+    setMessage("Display cleared. Generate or upload MCA MSME-1 data again when ready.");
+    setError("");
+  }, [displayResetVersion]);
+
+  useEffect(() => {
+    if (!automationRun?.id || AUTOMATION_TERMINAL_STATUSES.has(automationRun.status)) return undefined;
+    const timer = setInterval(async () => {
+      try {
+        const response = await fetchMcaMsme1AutomationStatus(automationRun.id);
+        setAutomationRun(response.run);
+        setAutomationEvents(response.events || []);
+      } catch (err) {
+        setError(err.message);
+      }
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [automationRun?.id, automationRun?.status]);
 
   const runPreview = async () => {
     if (!reportId) return;
     if (!isValidFiscalYear(selectedReport?.fiscalYear)) {
       setPreview(null);
-      setError("MCA MSME-1 requires a financial-year-specific completed report. Please select or generate FY 2026-27 report.");
+      setError(`MCA MSME-1 requires a financial-year-specific completed report. Please select or generate FY ${TARGET_FISCAL_YEAR} report.`);
       return;
     }
     setLoading("preview");
@@ -108,7 +223,7 @@ export default function MCAMSME1Filing() {
   const generateUtility = async () => {
     if (!reportId) return;
     if (!isValidFiscalYear(selectedReport?.fiscalYear)) {
-      setError("MCA MSME-1 requires a financial-year-specific completed report. Please select or generate FY 2026-27 report.");
+      setError(`MCA MSME-1 requires a financial-year-specific completed report. Please select or generate FY ${TARGET_FISCAL_YEAR} report.`);
       return;
     }
     setLoading("generate");
@@ -141,65 +256,128 @@ export default function MCAMSME1Filing() {
     }
   };
 
-  const fileToBase64 = (file) => new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || "").split(",").pop());
-    reader.onerror = () => reject(reader.error || new Error("Unable to read file"));
-    reader.readAsDataURL(file);
-  });
+  const updateAutomationForm = (field, value) => {
+    setAutomationForm((prev) => ({ ...prev, [field]: value }));
+  };
 
-  const uploadExcel = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file || !reportId) return;
-    setLoading("upload-excel");
+  const changeReport = (nextReportId) => {
+    setReportId(nextReportId);
+    setPreview(null);
+    setSelectedFiling(null);
+    setUploadedRows([]);
+    setAutomationRun(null);
+    setAutomationEvents([]);
+    setMessage("");
+    setError("");
+  };
+
+  const changeFiscalYear = (fiscalYear) => {
+    changeReport(reportsByFiscalYear[fiscalYear]?.id || "");
+  };
+
+  const changeHalfYear = (nextHalfYear) => {
+    setHalfYear(nextHalfYear);
+    setPreview(null);
+    setSelectedFiling(null);
+    setUploadedRows([]);
+    setAutomationRun(null);
+    setAutomationEvents([]);
+    setMessage("");
+    setError("");
+  };
+
+  const resolveSelectedFiling = async () => {
+    if (selectedFiling?.id) return selectedFiling;
+    const filingData = await fetchMcaMsme1Filings();
+    const latestFiling = findLatestGeneratedFiling(filingData.filings || [], reportId, halfYear);
+    setSelectedFiling(latestFiling || null);
+    return latestFiling;
+  };
+
+  const fileMsme1 = async () => {
+    setLoading("file-msme1");
     setError("");
     setMessage("");
+    let filing = null;
     try {
-      const contentBase64 = await fileToBase64(file);
-      const response = await uploadMcaMsme1Excel({
-        reportId,
-        fileName: file.name,
-        contentBase64,
+      filing = await resolveSelectedFiling();
+    } catch (err) {
+      setLoading("");
+      setError(err.message);
+      return;
+    }
+    if (!filing?.id) {
+      setLoading("");
+      setError("Generate MCA MSME-1 .xlsm before starting assisted filing automation.");
+      return;
+    }
+    try {
+      const response = await startMcaMsme1AssistedFiling(filing.id, {
+        mcaUserId: automationForm.mcaUserId,
         companyDetails,
-        fiscalYear: selectedReport?.fiscalYear,
-        halfYear,
       });
-      setSelectedFiling(response.filing);
-      setUploadedRows(response.rows || []);
-      await loadBase();
-      setMessage(response.validation?.valid ? "Uploaded MCA Excel validated." : "Uploaded MCA Excel has validation errors.");
+      setAutomationRun(response.run);
+      setAutomationEvents(response.events || []);
+      setMessage("MCA portal opened in Chrome. The automation will select Login/Register, then pause for manual login.");
+    } catch (err) {
+      const opened = window.open(MCA_PORTAL_URL, "_blank", "noopener,noreferrer");
+      if (!opened) window.location.assign(MCA_PORTAL_URL);
+      setError(err.message);
+      setMessage("Opened MCA home page directly. Select Login/Register on MCA and continue manually.");
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const continueAutomation = async () => {
+    if (!automationRun?.id) return;
+    setLoading("automation-continue");
+    setError("");
+    try {
+      const response = await continueMcaMsme1Automation(automationRun.id);
+      setAutomationRun(response.run);
+      setAutomationEvents(response.events || []);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading("");
-      event.target.value = "";
     }
   };
 
-  const generateXml = async () => {
-    if (!selectedFiling?.id) return;
-    setLoading("xml");
+  const abortAutomation = async () => {
+    if (!automationRun?.id) return;
+    setLoading("automation-abort");
     setError("");
-    setMessage("");
     try {
-      const response = await generateMcaMsme1Xml({ filingId: selectedFiling.id, companyDetails });
-      setXmlGeneration(response);
-      if (response.generated) {
-        setMessage("MCA MSME-1 XML generated and ready to download.");
-        await loadBase();
+      const response = await abortMcaMsme1Automation(automationRun.id);
+      setAutomationRun(response.run);
+      setAutomationEvents(response.events || []);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading("");
+    }
+  };
+
+  const captureAutomationSrn = async () => {
+    if (!automationRun?.id) return;
+    setLoading("automation-srn");
+    setError("");
+    try {
+      const response = await captureMcaMsme1AutomationSrn(automationRun.id);
+      setAutomationRun(response.run);
+      setAutomationEvents(response.events || []);
+      if (response.run?.srn) {
+        setSelectedFiling((prev) => (prev ? { ...prev, srn: response.run.srn, status: "submitted" } : prev));
+        setMessage(`SRN ${response.run.srn} captured and saved.`);
       } else {
-        setMessage("XML generation blocked. Fix validation errors first.");
+        setMessage("SRN was not detected. Check the MCA acknowledgement screen and click Capture SRN again.");
       }
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading("");
     }
-  };
-
-  const downloadXml = async () => {
-    if (!xmlGeneration?.generationId) return;
-    await downloadUrl(mcaMsme1XmlDownloadUrl(xmlGeneration.generationId), `MCA_MSME1_${selectedFiling?.fiscalYear}_${selectedFiling?.halfYear}.xml`);
   };
 
   return (
@@ -211,13 +389,31 @@ export default function MCAMSME1Filing() {
 
       {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 mb-4 text-sm font-semibold">{error}</div>}
       {message && <div className="bg-blue-50 border border-blue-200 text-blue-700 rounded-lg p-3 mb-4 text-sm font-semibold">{message}</div>}
+      {autoGeneratingReports && <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg p-3 mb-4 text-sm font-semibold">Generating missing FY 2025-26 / FY 2026-27 MSME reports...</div>}
+      {reportId && (
+        <section className="grid lg:grid-cols-[0.8fr_1.2fr] gap-5 mb-5">
+          <ComplianceRiskScore reportId={reportId} />
+          <ComplianceExplanationPanel reportId={reportId} />
+        </section>
+      )}
 
       <div className="grid gap-5">
         <section className="bg-white rounded-lg p-5 shadow">
-          <div className="grid md:grid-cols-[0.7fr] gap-4">
+          <div className="grid md:grid-cols-2 gap-4">
+            <label className="block">
+              <span className="block text-xs font-semibold text-gray-700 mb-1">Financial Year</span>
+              <select value={selectedReport?.fiscalYear || ""} onChange={(event) => changeFiscalYear(event.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
+                <option value="">Select financial year</option>
+                {DISPLAY_FISCAL_YEARS.map((fiscalYear) => (
+                  <option key={fiscalYear} value={fiscalYear}>
+                    FY {fiscalYear}{reportsByFiscalYear[fiscalYear] ? "" : " (report not generated)"}
+                  </option>
+                ))}
+              </select>
+            </label>
             <label className="block">
               <span className="block text-xs font-semibold text-gray-700 mb-1">Half-Year</span>
-              <select value={halfYear} onChange={(event) => { setHalfYear(event.target.value); setPreview(null); }} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
+              <select value={halfYear} onChange={(event) => changeHalfYear(event.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm">
                 {HALF_YEARS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
@@ -240,11 +436,19 @@ export default function MCAMSME1Filing() {
 
           <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 mt-4 text-sm">
             <p className="font-semibold">MSME-1 filing: FY {selectedReport?.fiscalYear || TARGET_FISCAL_YEAR} | {halfYearLabel(halfYear)}{dueDate ? ` | Due date ${dueDate}` : ""}</p>
+            {selectedReport?.fiscalYear === "2026-27" && halfYear === "apr-sep" && (
+              <p className="text-xs mt-1 font-semibold text-red-700">April-September 2026 belongs to FY 2026-27 and is not the default filing period here. Use FY 2025-26 for current display/working.</p>
+            )}
             <p className="text-xs mt-1">Report only outstanding dues to Micro and Small suppliers exceeding 45 days. Nil MSME-1 return is not required where no such outstanding dues exist.</p>
           </div>
 
+          <div className="bg-red-50 border border-red-200 text-red-800 rounded-lg p-3 mt-4 text-sm">
+            <p className="font-bold">Assisted Filing Automation</p>
+            <p className="text-xs mt-1">MCA credentials are used only for this session and are not stored. OTP, CAPTCHA, DSC and final submission must be completed manually on MCA portal.</p>
+          </div>
+
           <div className="flex flex-wrap gap-2 mt-5">
-            <button onClick={runPreview} disabled={!reportId || Boolean(loading)} className="bg-blue-700 text-white px-5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
+            <button onClick={runPreview} disabled={!reportId || Boolean(loading) || autoGeneratingReports} className="bg-blue-700 text-white px-5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
               {loading === "preview" ? "Preparing..." : "Preview MCA Rows"}
             </button>
             <button onClick={generateUtility} disabled={!canGenerate} className="bg-green-700 text-white px-5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
@@ -253,17 +457,39 @@ export default function MCAMSME1Filing() {
             {selectedFiling?.downloadUrl && (
               <button onClick={() => downloadFiling(selectedFiling)} className="bg-gray-900 text-white px-5 py-2 rounded-lg text-sm font-semibold">Download .xlsm</button>
             )}
-            <label className="bg-gray-100 text-gray-800 px-5 py-2 rounded-lg text-sm font-semibold cursor-pointer">
-              {loading === "upload-excel" ? "Uploading..." : "Upload Excel"}
-              <input type="file" accept=".xlsx,.xlsm" onChange={uploadExcel} className="hidden" disabled={!reportId || Boolean(loading)} />
-            </label>
-            <button onClick={generateXml} disabled={!selectedFiling?.id || Boolean(loading)} className="bg-purple-700 text-white px-5 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
-              {loading === "xml" ? "Generating XML..." : "Generate XML"}
-            </button>
-            {xmlGeneration?.generated && (
-              <button onClick={downloadXml} className="bg-purple-100 text-purple-800 px-5 py-2 rounded-lg text-sm font-semibold">Download XML</button>
-            )}
           </div>
+
+          <section className="mt-5 border border-slate-200 rounded-lg p-4 bg-slate-50">
+            <div className="flex flex-wrap justify-between gap-3 mb-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-800">Assisted MCA Portal Filing</h3>
+                <p className="text-xs text-slate-500">Launches visible Chrome and automates only safe MCA steps. Final filing remains manual.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={fileMsme1} disabled={!reportId || loading === "file-msme1" || canAbortAutomation} className="bg-red-700 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
+                  {loading === "file-msme1" ? "Starting..." : "File MSME-1"}
+                </button>
+                <button onClick={continueAutomation} disabled={!canContinueAutomation || Boolean(loading)} className="bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
+                  Continue
+                </button>
+                <button onClick={abortAutomation} disabled={!canAbortAutomation || Boolean(loading)} className="bg-gray-800 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
+                  Abort
+                </button>
+                <button onClick={captureAutomationSrn} disabled={!canCaptureSrn || Boolean(loading)} className="bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">
+                  Capture SRN
+                </button>
+              </div>
+            </div>
+
+            <div className="grid md:grid-cols-3 gap-3">
+              <label className="block">
+                <span className="block text-xs font-semibold text-gray-700 mb-1">MCA User ID</span>
+                <input value={automationForm.mcaUserId} onChange={(event) => updateAutomationForm("mcaUserId", event.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm" autoComplete="off" />
+              </label>
+            </div>
+
+            <AutomationStatusPanel run={automationRun} events={automationEvents} />
+          </section>
 
           {uploadedRows.length > 0 && (
             <p className="text-xs text-gray-500 mt-3">{uploadedRows.length.toLocaleString("en-IN")} supplier rows uploaded from MCA Excel.</p>
@@ -334,6 +560,61 @@ export default function MCAMSME1Filing() {
         </section>
       )}
 
+    </div>
+  );
+}
+
+function AutomationStatusPanel({ run, events = [] }) {
+  if (!run) {
+    return (
+      <div className="mt-4 bg-white border border-slate-200 rounded-lg p-3 text-sm text-slate-500">
+        No assisted filing run started yet. Generate the `.xlsm`, complete the session fields, then click File MSME-1.
+      </div>
+    );
+  }
+  const manualAction = MANUAL_AUTOMATION_STATUSES.has(run.status)
+    ? run.message
+    : "";
+  return (
+    <div className="mt-4 bg-white border border-slate-200 rounded-lg p-4">
+      <div className="grid md:grid-cols-3 gap-3 text-sm">
+        <StatusItem label="Current automation step" value={run.currentStep || run.status} />
+        <StatusItem label="Action being performed" value={run.message || "-"} />
+        <StatusItem label="Manual action required" value={manualAction || "No"} tone={manualAction ? "yellow" : "green"} />
+        <StatusItem label="File uploaded" value={run.selectedFilePath ? `${run.fileTypeUsed || "xlsm"} selected` : "Not yet"} />
+        <StatusItem label="MCA validation error" value={run.errorMessage || "None"} tone={run.errorMessage ? "red" : "green"} />
+        <StatusItem label="SRN captured" value={run.srn || "Pending"} tone={run.srn ? "green" : "gray"} />
+      </div>
+      {run.screenshotPath && (
+        <p className="text-xs text-red-700 mt-3 break-all">Screenshot saved: {run.screenshotPath}</p>
+      )}
+      {events.length > 0 && (
+        <div className="mt-4 border-t border-slate-100 pt-3">
+          <p className="text-xs font-bold text-slate-600 mb-2">Automation Events</p>
+          <div className="max-h-36 overflow-auto space-y-1">
+            {events.slice(-8).map((event) => (
+              <p key={event.id} className="text-xs text-slate-500">
+                <span className="font-semibold text-slate-700">{event.stepName || event.eventType}</span>: {event.message}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatusItem({ label, value, tone = "gray" }) {
+  const tones = {
+    gray: "bg-slate-50 text-slate-800",
+    green: "bg-green-50 text-green-700",
+    yellow: "bg-yellow-50 text-yellow-800",
+    red: "bg-red-50 text-red-700",
+  };
+  return (
+    <div className={`${tones[tone] || tones.gray} rounded-lg p-3 min-h-20`}>
+      <p className="text-xs font-semibold opacity-80">{label}</p>
+      <p className="text-sm font-bold mt-1 break-words">{value}</p>
     </div>
   );
 }
