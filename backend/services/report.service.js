@@ -55,6 +55,25 @@ function roundMoney(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function taxDisallowanceFyLabel(value, fallback = "") {
+  const year = String(value || fallback || "").trim();
+  if (!year || year === "all") return "F.Y 2025-26";
+  if (/^F\.Y\s+/i.test(year)) return year;
+  return `F.Y ${year}`;
+}
+
+function downloadFinancialYear(value) {
+  return String(value || "").trim().toLowerCase() === "all" ? "2025-26" : value;
+}
+
+function normalizeDownloadFinancialYear(row = {}) {
+  const next = { ...row };
+  for (const key of ["financialYear", "fiscalYear", "F.Y", "FY"]) {
+    if (Object.prototype.hasOwnProperty.call(next, key)) next[key] = downloadFinancialYear(next[key]);
+  }
+  return next;
+}
+
 function summarizeBankRateSource(rows = []) {
   const periods = rows.flatMap((row) => [
     ...(row.ratePeriods || []),
@@ -468,9 +487,10 @@ function consolidateReportRows(rows = [], selectedFinancialYear = "") {
       unpaidDelayedInvoices.reduce((sum, row) => sum + Number(row.exposure43Bh || 0), 0) +
       paidLateInvoices.reduce((sum, row) => sum + Number(row.paidLateAmount || row.principalAmount || row.originalAmount || 0), 0)
     );
+    const years = mergeUniqueRows(sorted.map((row) => row.financialYear).filter(Boolean));
     return {
       ...base,
-      financialYear: "all",
+      financialYear: years.length === 1 ? years[0] : "all",
       reportFromDate: minDateValue(sorted.map((row) => row.reportFromDate)),
       reportToDate: maxDateValue(sorted.map((row) => row.reportToDate)),
       asOnDate: maxDateValue(sorted.map((row) => row.asOnDate)),
@@ -850,7 +870,7 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
     }));
   const clause26 = [
     ...disallowance43Bh.filter((row) => row.paymentStatus !== "paid_late").map((row) => ({
-      financialYear: row.financialYear,
+      financialYear: taxDisallowanceFyLabel(row.financialYear, summary.selectedFinancialYear),
       supplier: row.vendorName,
       vendorName: row.vendorName,
       panNumber: row.panNumber,
@@ -867,8 +887,15 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       status: "unpaid_delayed",
       remarks: "Principal disallowance under actual-payment rule.",
     })),
-    ...paidLateRows,
+    ...paidLateRows.map((row) => ({
+      ...row,
+      financialYear: taxDisallowanceFyLabel(row.financialYear, summary.selectedFinancialYear),
+    })),
   ];
+  const voucherWiseDelayEvidence = invoiceAging.map((row) => ({
+    ...row,
+    financialYear: taxDisallowanceFyLabel(row.financialYear, summary.selectedFinancialYear),
+  }));
   const interestMovement = report.map((row) => {
     const vendorInterestRows = msmedSection16Interest.filter((item) => item.vendorName === row.vendorName && item.financialYear === row.financialYear);
     const interestAccrued = roundMoney(vendorInterestRows.reduce((sum, item) => sum + Number(item.interestAmount || 0), 0));
@@ -1008,7 +1035,7 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
   ].map(([disclosureItem, amount, sourceSchedule, notes]) => ({ disclosureItem, amount, sourceSchedule, notes }));
   const taxDisallowanceSummary = [
     ...clause43BhFromClause22.map((row) => ({
-      financialYear: row.financialYear,
+      financialYear: taxDisallowanceFyLabel(row.financialYear, summary.selectedFinancialYear),
       vendorName: row.vendorName || row.supplier,
       invoiceNumber: row.invoiceNumber || "",
       disallowanceType: "43B(h) principal",
@@ -1020,7 +1047,7 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       remarks: row.remarks,
     })),
     ...msmedSection23PermanentDisallowance.map((row) => ({
-      financialYear: row.financialYear,
+      financialYear: taxDisallowanceFyLabel(row.financialYear, summary.selectedFinancialYear),
       vendorName: row.vendorName,
       invoiceNumber: row.invoiceNumber,
       disallowanceType: "Section 23 MSME interest",
@@ -1087,7 +1114,7 @@ function buildReportSchedules({ report, excluded, creditors, summary }) {
       closingBalance: row.closingBalance,
       mismatchFlag: row.outstandingMismatch ? "YES" : "NO",
     })),
-    voucherWiseDelayEvidence: invoiceAging,
+    voucherWiseDelayEvidence,
     invoiceAging,
     interestCalculation,
     interestMovement,
@@ -1357,7 +1384,7 @@ function verifiedReportHtml(report) {
   const generated = new Date(report.createdAt || Date.now()).toLocaleString("en-IN");
   const vendorRows = rows.map((row) => `
     <tr>
-      <td>${escapeHtml(row.financialYear || report.fiscalYear)}</td>
+      <td>${escapeHtml(downloadFinancialYear(row.financialYear || report.fiscalYear))}</td>
       <td>${escapeHtml(row.vendorName)}</td>
       <td>${escapeHtml(row.panNumber || "")}</td>
       <td>${escapeHtml(row.udyamNumber)}</td>
@@ -1371,7 +1398,7 @@ function verifiedReportHtml(report) {
   `).join("");
   const evidenceRows = voucherRows.map((row) => `
     <tr>
-      <td>${escapeHtml(row.financialYear || "")}</td>
+      <td>${escapeHtml(downloadFinancialYear(row.financialYear || ""))}</td>
       <td>${escapeHtml(row.vendorName || "")}</td>
       <td>${escapeHtml(row.invoiceNumber || "")}</td>
       <td>${escapeHtml(displayDate(row.invoiceDate || ""))}</td>
@@ -1652,7 +1679,7 @@ function toTallyReconciliationCsv(report) {
 }
 
 function sheetFromRows(rows = [], fallbackHeaders = []) {
-  const safeRows = Array.isArray(rows) ? rows : [];
+  const safeRows = Array.isArray(rows) ? rows.map(normalizeDownloadFinancialYear) : [];
   if (safeRows.length) return XLSX.utils.json_to_sheet(safeRows);
   const headers = fallbackHeaders.length ? fallbackHeaders : ["No records"];
   return XLSX.utils.aoa_to_sheet([headers, ["No records"]]);

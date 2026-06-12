@@ -74,7 +74,7 @@ export default function Dashboard({ user }) {
       <main className="p-4 md:p-6 max-w-[1500px] mx-auto">
         {activeTab === "dashboard" && <Home setActiveTab={setActiveTab} displayResetVersion={displayResetVersion} />}
         <section hidden={activeTab !== "tally"}>
-          <TallyImport onClearDisplay={clearDisplayData} />
+          <TallyImport onClearDisplay={clearDisplayData} displayResetVersion={displayResetVersion} />
         </section>
         {activeTab === "compliance" && <ComplianceReportSection />}
         {activeTab === "clause22" && <Clause22Section />}
@@ -283,7 +283,7 @@ function ComplianceReportSection() {
         </div>
       </Panel>
       {report && (
-        <Panel title="Report Snapshot" subtitle={`Report ${report.id}`}>
+        <Panel title="Report Snapshot" subtitle="MSME Compliance Report">
           {warnings.map((warning) => <Alert key={warning} tone="yellow" text={warning} />)}
           <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
             <Metric label="Report vendors" value={number(report.summary?.reportVendors)} tone="green" />

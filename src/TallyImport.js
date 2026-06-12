@@ -234,8 +234,9 @@ function downloadUdyamTemplate() {
   XLSX.writeFile(workbook, "Udyam_Import_Template.xlsx");
 }
 
-export default function TallyImport({ onClearDisplay }) {
+export default function TallyImport({ onClearDisplay, displayResetVersion = 0 }) {
   const activeImportRequestRef = useRef(0);
+  const handledDisplayResetRef = useRef(displayResetVersion);
   const [vendors, setVendors] = useState([]);
   const [selectedFY, setSelectedFY] = useState(getCurrentFinancialYear());
   const [reportFinancialYear, setReportFinancialYear] = useState("all");
@@ -570,6 +571,14 @@ export default function TallyImport({ onClearDisplay }) {
     setDownloadingReport("");
     setNotice("Display cleared. Start a fresh Tally import when ready.");
   };
+
+  useEffect(() => {
+    if (!displayResetVersion || handledDisplayResetRef.current === displayResetVersion) return;
+    handledDisplayResetRef.current = displayResetVersion;
+    resetImportDisplay();
+    // resetImportDisplay intentionally centralizes all local display state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayResetVersion]);
 
   const handleImport = async () => {
     if (fetching) return;
@@ -1130,7 +1139,7 @@ export default function TallyImport({ onClearDisplay }) {
           <div className="flex justify-between items-center mb-6 flex-wrap gap-3">
             <div>
               <h3 className="text-xl font-bold text-gray-800">Compliance Report</h3>
-              <p className="text-sm text-gray-500">Report snapshot: {report.id}</p>
+              <p className="text-sm text-gray-500">Report snapshot: MSME Compliance Report</p>
             </div>
             <div className="flex gap-2">
               <button disabled={Boolean(downloadingReport)} onClick={() => handleReportDownload("CSV", () => downloadReportFile(report.id, "csv"))} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-semibold disabled:opacity-50">{downloadingReport === "CSV" ? "Starting..." : "Download CSV"}</button>
