@@ -14,8 +14,6 @@ import {
   previewMcaMsme1,
   startMcaMsme1AssistedFiling,
 } from "./services/api";
-import ComplianceExplanationPanel from "./components/ComplianceExplanationPanel";
-import ComplianceRiskScore from "./components/ComplianceRiskScore";
 
 const HALF_YEARS = [
   ["apr-sep", "April-September"],
@@ -390,13 +388,6 @@ export default function MCAMSME1Filing({ displayResetVersion = 0 }) {
       {error && <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 mb-4 text-sm font-semibold">{error}</div>}
       {message && <div className="bg-blue-50 border border-blue-200 text-blue-700 rounded-lg p-3 mb-4 text-sm font-semibold">{message}</div>}
       {autoGeneratingReports && <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg p-3 mb-4 text-sm font-semibold">Generating missing FY 2025-26 / FY 2026-27 MSME reports...</div>}
-      {reportId && (
-        <section className="grid lg:grid-cols-[0.8fr_1.2fr] gap-5 mb-5">
-          <ComplianceRiskScore reportId={reportId} />
-          <ComplianceExplanationPanel reportId={reportId} />
-        </section>
-      )}
-
       <div className="grid gap-5">
         <section className="bg-white rounded-lg p-5 shadow">
           <div className="grid md:grid-cols-2 gap-4">

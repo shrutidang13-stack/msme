@@ -178,8 +178,24 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
       if (!normalizedVendorName) continue;
       voucherCountsByVendor.set(normalizedVendorName, (voucherCountsByVendor.get(normalizedVendorName) || 0) + 1);
     }
+    const seenCreditors = new Set();
+    let duplicateCreditorCount = 0;
     for (const creditor of creditors) {
       const normalizedVendorName = creditor.normalizedVendorName || normalizeVendorName(creditor.party);
+      const creditorKey = [
+        normalizedVendorName,
+        String(creditor.panNumber || "").trim().toUpperCase(),
+        Number(creditor.outstandingAmount || 0),
+        Number(creditor.openingBalance || 0),
+        Number(creditor.closingBalance || 0),
+        String(creditor.openingBalanceRaw || ""),
+        String(creditor.closingBalanceRaw || ""),
+      ].join("|");
+      if (seenCreditors.has(creditorKey)) {
+        duplicateCreditorCount += 1;
+        continue;
+      }
+      seenCreditors.add(creditorKey);
       const voucherCount = voucherCountsByVendor.get(normalizedVendorName) || creditor.voucherCount || 0;
       insert.run(
         crypto.randomUUID(),
@@ -291,6 +307,7 @@ function completeRun(id, { summary, creditors, ledgerVouchers = [] }) {
       ...(summary || {}),
       vouchersPersisted: persistedVoucherCount,
       duplicateVouchersSkipped: duplicateVoucherCount,
+      duplicateCreditorsSkipped: duplicateCreditorCount,
     };
     db.prepare(`
       UPDATE tally_import_runs

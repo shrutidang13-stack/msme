@@ -1699,6 +1699,24 @@ test("MSME compliance workbook export includes all statutory verification sheets
   ]);
 });
 
+test("MSME compliance workbook download displays all FY rows as 2025-26", () => {
+  const workbook = XLSX.read(toWorkbookBuffer({
+    id: "download-fy-test",
+    fiscalYear: "all",
+    createdAt: "2026-06-11T00:00:00.000Z",
+    summary: {},
+    schedules: {
+      creditorLedgerSummary: [{
+        financialYear: "all",
+        creditorLedger: "All FY Supplier",
+        ledgerPayableOutstanding: 100,
+      }],
+    },
+  }), { type: "buffer" });
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets["Creditor Ledger Summary"]);
+  assert.equal(rows[0].financialYear, "2025-26");
+});
+
 test("Clause 22(iii)(b), 43B(h), report summary, and Excel workbook totals reconcile", () => {
   const latest = reportRepository.listReports()[0];
   const clause22Total = latest.schedules.clause22Computation.reduce((sum, row) => sum + Number(row.clause22iiiBOutstandingDisallowance || 0), 0);
@@ -2619,6 +2637,19 @@ test("compliance command center services consume persisted report data", async (
   const explanation = complianceExplanationService.explain({ reportId: saved.id, explanationType: "tax_impact" });
   assert.match(explanation.outputText, /reviewed by a professional/i);
   assert.match(explanation.outputText, /43B/i);
+  assert.match(explanation.outputText, /Tax exposure snapshot/i);
+  assert.match(explanation.outputText, /MSME Compliance Report covers FY/i);
+  assert.doesNotMatch(explanation.outputText, new RegExp(`Report ${saved.id}`));
+
+  const clientExplanation = complianceExplanationService.explain({ reportId: saved.id, explanationType: "client" });
+  const auditorExplanation = complianceExplanationService.explain({ reportId: saved.id, explanationType: "auditor" });
+  const mcaExplanation = complianceExplanationService.explain({ reportId: saved.id, explanationType: "mca_impact" });
+  assert.match(clientExplanation.outputText, /Business summary/i);
+  assert.match(auditorExplanation.outputText, /Audit lens/i);
+  assert.match(mcaExplanation.outputText, /MSME-1 filing view/i);
+  assert.notEqual(clientExplanation.outputText, auditorExplanation.outputText);
+  assert.notEqual(clientExplanation.outputText, explanation.outputText);
+  assert.notEqual(mcaExplanation.outputText, explanation.outputText);
 
   const pack = await auditEvidencePackService.buildAuditEvidencePack(saved.id, { includePdf: false });
   assert.equal(pack.subarray(0, 4).toString("hex"), "504b0304");
